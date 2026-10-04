@@ -48,6 +48,20 @@ export const QUALITY = {
 
 const RATE_LIMITS = { chat: [8, 5000], react: [6, 3000], img: [40, 10000], gallery: [10, 10000], drawreq: [3, 10000] };
 
+// Relays Nostr usados para os PCs se encontrarem. Lista fixa, testada:
+// os dois primeiros eram usados pela versão 2.1.0 e continuam aqui para que
+// versões antigas e novas se achem. Todos precisam aceitar eventos efêmeros.
+const NOSTR_RELAYS = [
+  'wss://relay-can.zombi.cloudrodion.com',
+  'wss://staging.yabu.me',
+  'wss://nos.lol',
+  'wss://relay.primal.net',
+  'wss://offchain.pub',
+  'wss://relay.snort.social',
+  'wss://nostr.oxtr.dev',
+  'wss://nostr.mom',
+];
+
 export class TurmaSession extends EventTarget {
   constructor({ code, settings }) {
     super();
@@ -85,7 +99,7 @@ export class TurmaSession extends EventTarget {
       this.sockets = relaySockets;
     } else {
       this.mode = 'auto';
-      this.room = joinNostr({ ...config, relayConfig: { warnOnRelayFailure: false } }, code, callbacks);
+      this.room = joinNostr({ ...config, relayConfig: { urls: NOSTR_RELAYS, warnOnRelayFailure: false } }, code, callbacks);
       this.sockets = nostrSockets;
     }
 

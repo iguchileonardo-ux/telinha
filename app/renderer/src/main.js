@@ -185,11 +185,20 @@ async function createTurma() {
 async function joinByCode(code) {
   if (!ensureName()) { pendingCode = code; return; }
   $('suggest').hidden = true;
-  if (!turmas.some((t) => t.code === code)) {
+  const isNew = !turmas.some((t) => t.code === code);
+  if (isNew) {
     await store.saveTurma(store.newTurma(code, ''));
     await refreshTurmas();
   }
   await openTurma(code);
+  if (isNew) {
+    // Ao entrar por convite, avisa se ninguém da turma estiver online.
+    setTimeout(() => {
+      if (session?.code === code && session.peers.size === 0) {
+        toast('Ninguém da turma está online agora. Vocês se conectam assim que outra pessoa abrir a Telinha.', 6000);
+      }
+    }, 20000);
+  }
 }
 
 async function openTurma(code) {
