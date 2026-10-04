@@ -1,0 +1,8 @@
+node_modules/
+release/
+app/renderer/dist/
+server/node_modules/
+.node/
+teste-log*.txt
+instalador-log.txt
+publicar-log.txt

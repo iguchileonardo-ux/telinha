@@ -1,0 +1,17 @@
+{
+  "name": "telinha-servidor",
+  "version": "1.0.0",
+  "description": "Servidor de sinalização opcional da Telinha",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@trystero-p2p/ws-relay": "0.25.4"
+  }
+}

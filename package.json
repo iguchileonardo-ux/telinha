@@ -1,0 +1,87 @@
+{
+  "name": "telinha",
+  "productName": "Telinha",
+  "version": "2.1.0",
+  "description": "Compartilhamento de tela entre amigos, direto pela internet, sem VPN.",
+  "main": "app/main.js",
+  "private": true,
+  "scripts": {
+    "start": "node build.mjs && electron .",
+    "segunda": "node build.mjs && electron . --perfil=2",
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "dist": "node build.mjs && electron-builder --win",
+    "servidor": "node server/server.mjs",
+    "publicar": "node build.mjs && electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "dev.telinha.app",
+    "productName": "Telinha",
+    "files": [
+      "app/**/*",
+      "!app/renderer/src/**/*"
+    ],
+    "protocols": [
+      {
+        "name": "Telinha",
+        "schemes": [
+          "telinha"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Telinha",
+      "runAfterFinish": true,
+      "artifactName": "Telinha-Instalador.exe"
+    },
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "asarUnpack": [
+      "**/*.node",
+      "node_modules/loopback-capture/**",
+      "node_modules/koffi/**",
+      "node_modules/@koromix/**"
+    ],
+    "npmRebuild": false,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "iguchileonardo-ux",
+        "repo": "telinha",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@trystero-p2p/nostr": "0.25.4",
+    "@trystero-p2p/ws-relay": "0.25.4",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9",
+    "koffi": "3.3.2",
+    "loopback-capture": "3.0.2"
+  },
+  "author": "Leo",
+  "telinha": {
+    "updateRepo": "iguchileonardo-ux/telinha"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iguchileonardo-ux/telinha.git"
+  }
+}

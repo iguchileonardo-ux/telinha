@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' blob:; style-src 'self'; img-src 'self' data: blob: https://i.ytimg.com; media-src 'self' blob: mediastream:; connect-src 'self' ws: wss:" />
+  <title>Telinha</title>
+  <link rel="stylesheet" href="style.css" />
+  <script defer src="dist/app.js"></script>
+</head>
+<body>
+  <header class="titlebar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span>telinha</span></div>
+    <div class="turma-title" id="turmaTitle" hidden>
+      <span class="dot" id="signalDot"></span>
+      <span id="turmaName"></span>
+    </div>
+    <div class="titlebar-fill"></div>
+    <div class="segmented tabs" id="tabs" hidden>
+      <button type="button" data-tab="chat"><i data-icon="chat" data-size="15"></i>Chat<span class="badge-dot" id="chatDot" hidden></span></button>
+      <button type="button" data-tab="call"><i data-icon="call" data-size="15"></i>Call<span class="badge-dot live" id="callDot" hidden></span></button>
+    </div>
+    <div class="titlebar-fill"></div>
+    <button class="avatars-btn" id="membersBtn" type="button" title="Membros" hidden></button>
+    <button class="icon-btn" id="inviteBtn" type="button" title="Copiar convite" aria-label="Copiar convite" hidden><i data-icon="link"></i></button>
+    <button class="icon-btn" id="settingsBtn" type="button" title="Configurações" aria-label="Configurações"><i data-icon="sliders"></i><span class="badge-dot" id="updateDot" hidden></span></button>
+  </header>
+
+  <div class="app">
+    <nav class="rail" id="rail" aria-label="Turmas">
+      <div class="rail-list" id="railList"></div>
+      <button class="rail-add" id="railAdd" type="button" title="Criar ou entrar em uma turma" aria-label="Criar ou entrar em uma turma"><i data-icon="plus"></i></button>
+    </nav>
+
+    <main class="content" id="content">
+      <div class="suggest floating" id="suggest" hidden>
+        <span class="suggest-text">Convite copiado: <b id="suggestCode"></b></span>
+        <button class="btn primary small" id="suggestJoin" type="button">Entrar</button>
+        <button class="icon-btn small" id="suggestDismiss" type="button" aria-label="Ignorar"><i data-icon="close" data-size="14"></i></button>
+      </div>
+
+      <!-- Boas-vindas -->
+      <section class="view" id="welcome" hidden>
+        <div class="home">
+          <h1>Sua turma, suas telas.</h1>
+          <p class="lead">Crie uma turma e chame seus amigos. Sem VPN e sem código: só um convite.</p>
+          <div class="profile-row">
+            <button class="avatar-pick" id="welcomeAvatar" type="button" title="Escolher foto"></button>
+            <label class="field grow">
+              <span>Seu nome</span>
+              <input id="nameInput" maxlength="32" placeholder="Como seus amigos vão te ver" autocomplete="off" spellcheck="false" />
+            </label>
+          </div>
+          <button class="btn primary big" id="createBtn" type="button">Criar turma</button>
+          <div class="divider"><span>ou entre com um convite</span></div>
+          <form class="join" id="joinForm" autocomplete="off">
+            <input id="joinInput" placeholder="Cole o convite aqui" spellcheck="false" aria-label="Convite da turma" />
+            <button class="btn" type="submit">Entrar</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- Chat -->
+      <section class="view" id="chatView" hidden>
+        <div class="pinned" id="pinned" hidden>
+          <i data-icon="pin" data-size="15"></i>
+          <span class="pinned-text" id="pinnedText"></span>
+          <button class="icon-btn small" id="unpinBtn" type="button" title="Desafixar" aria-label="Desafixar"><i data-icon="close" data-size="14"></i></button>
+        </div>
+        <div class="messages" id="messages"></div>
+        <form class="composer" id="composer" autocomplete="off">
+          <textarea id="composerInput" rows="1" maxlength="2000" placeholder="Mensagem para a turma"></textarea>
+          <button class="icon-btn" type="submit" title="Enviar" aria-label="Enviar"><i data-icon="send"></i></button>
+        </form>
+      </section>
+
+      <!-- Call -->
+      <section class="view" id="callView" hidden>
+        <div class="stage" id="stage"></div>
+        <div class="people" id="people"></div>
+        <div class="lobby" id="lobby">
+          <div class="lobby-people" id="lobbyPeople"></div>
+          <h2 id="lobbyTitle"></h2>
+          <p id="lobbyText"></p>
+          <div class="lobby-actions">
+            <button class="btn primary" id="joinCallBtn" type="button"><i data-icon="call" data-size="16"></i>Entrar na call</button>
+            <button class="btn ghost" id="joinMutedBtn" type="button">Entrar sem microfone</button>
+          </div>
+        </div>
+        <div class="audio-shares" id="audioShares"></div>
+
+        <div class="self-preview" id="selfPreview" hidden>
+          <video id="selfVideo" muted autoplay playsinline></video>
+          <span class="self-info">
+            <span class="live-dot"></span>
+            <span id="selfLabel">Ao vivo</span>
+            <span class="level" id="selfLevel" hidden><span></span></span>
+          </span>
+          <div class="draw-allowed" id="drawAllowed"></div>
+        </div>
+
+        <div class="draw-requests" id="drawRequests"></div>
+
+        <nav class="dock" id="dock" aria-label="Controles da call" hidden>
+          <button class="icon-btn" id="micBtn" type="button"></button>
+          <button class="btn primary" id="shareBtn" type="button"></button>
+          <button class="icon-btn" id="reactBtn" type="button" title="Reações" aria-label="Reações"><i data-icon="smile"></i></button>
+          <button class="icon-btn" id="radioBtn" type="button" title="Rádio" aria-label="Rádio"><i data-icon="music"></i></button>
+          <span class="dock-sep"></span>
+          <button class="icon-btn danger" id="leaveCallBtn" type="button" title="Sair da call" aria-label="Sair da call"><i data-icon="leave"></i></button>
+        </nav>
+      </section>
+
+      <div class="reaction-layer" id="reactionLayer" aria-hidden="true"></div>
+    </main>
+  </div>
+
+  <!-- Popovers -->
+  <div class="popover" id="membersPop" hidden></div>
+  <div class="popover" id="addPop" hidden>
+    <button class="menu-item" id="addCreate" type="button"><i data-icon="plus" data-size="16"></i>Criar turma</button>
+    <form class="join compact" id="addJoinForm" autocomplete="off">
+      <input id="addJoinInput" placeholder="Cole um convite" spellcheck="false" aria-label="Convite" />
+      <button class="btn small" type="submit">Entrar</button>
+    </form>
+  </div>
+  <div class="popover" id="turmaMenu" hidden></div>
+  <div class="popover reactions-pop" id="reactPop" hidden></div>
+  <div class="popover radio-pop" id="radioPop" hidden></div>
+
+  <!-- Seletor de tela -->
+  <dialog class="modal wide" id="picker" aria-labelledby="pickerTitle">
+    <div class="modal-head">
+      <h2 id="pickerTitle">O que você quer compartilhar?</h2>
+      <div class="segmented" id="pickerTabs">
+        <button type="button" data-kind="screen" class="active">Telas</button>
+        <button type="button" data-kind="window">Janelas</button>
+        <button type="button" data-kind="audio">Só som</button>
+      </div>
+    </div>
+    <div class="source-grid" id="sourceGrid"></div>
+    <div class="modal-foot">
+      <label class="switch" id="audioWrap">
+        <input type="checkbox" id="audioToggle" />
+        <span class="switch-track"></span>
+        <span class="switch-text">
+          <span id="audioLabel">Áudio do computador</span>
+          <small id="audioHint"></small>
+        </span>
+      </label>
+      <span class="grow"></span>
+      <button class="btn ghost" id="pickerCancel" type="button">Cancelar</button>
+      <button class="btn primary" id="pickerConfirm" type="button" disabled>Compartilhar</button>
+    </div>
+  </dialog>
+
+  <!-- Configurações -->
+  <dialog class="modal" id="settings" aria-labelledby="settingsTitle">
+    <div class="modal-head">
+      <h2 id="settingsTitle">Configurações</h2>
+      <button class="icon-btn small" id="settingsClose" type="button" aria-label="Fechar"><i data-icon="close" data-size="16"></i></button>
+    </div>
+
+    <div class="profile-row">
+      <button class="avatar-pick" id="setAvatar" type="button" title="Trocar foto"></button>
+      <label class="field grow">
+        <span>Seu nome</span>
+        <input id="setName" maxlength="32" autocomplete="off" spellcheck="false" />
+      </label>
+    </div>
+    <button class="link-btn" id="removeAvatar" type="button" hidden>Remover foto</button>
+
+    <div class="field">
+      <span>Tema</span>
+      <div class="segmented full" id="setTheme">
+        <button type="button" data-value="dark">Escuro</button>
+        <button type="button" data-value="light">Claro</button>
+        <button type="button" data-value="system">Sistema</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <span>Qualidade da transmissão</span>
+      <div class="segmented full" id="setQuality">
+        <button type="button" data-value="detail">Nitidez</button>
+        <button type="button" data-value="motion">Fluidez</button>
+        <button type="button" data-value="movie">Filme</button>
+      </div>
+      <small id="qualityHint"></small>
+    </div>
+
+    <div class="field">
+      <span>Áudio</span>
+      <div class="device-row">
+        <i data-icon="mic" data-size="16"></i>
+        <select id="setMic" aria-label="Microfone"></select>
+      </div>
+      <div class="device-row">
+        <i data-icon="volume" data-size="16"></i>
+        <select id="setSpeaker" aria-label="Saída de áudio"></select>
+      </div>
+    </div>
+
+    <details class="advanced" id="connDetails">
+      <summary>Conexão</summary>
+      <div class="segmented full" id="setSignaling">
+        <button type="button" data-value="auto">Automática</button>
+        <button type="button" data-value="server">Servidor próprio</button>
+      </div>
+      <small id="signalingHint"></small>
+      <input id="setServer" placeholder="wss://seu-servidor.onrender.com" spellcheck="false" autocomplete="off" hidden />
+      <small>Servidor TURN (opcional), para redes que bloqueiam a conexão direta.</small>
+      <input id="setTurnUrl" placeholder="turn:servidor.com:3478" spellcheck="false" autocomplete="off" />
+      <div class="row">
+        <input id="setTurnUser" placeholder="Usuário" spellcheck="false" autocomplete="off" />
+        <input id="setTurnPass" type="password" placeholder="Senha" autocomplete="off" />
+      </div>
+    </details>
+
+    <div class="about" id="about"></div>
+
+    <div class="modal-foot">
+      <span class="grow"></span>
+      <button class="btn ghost" id="settingsCancel" type="button">Cancelar</button>
+      <button class="btn primary" id="settingsSave" type="button">Salvar</button>
+    </div>
+  </dialog>
+
+  <div class="audio-sink" id="audioSink" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
