@@ -3,6 +3,11 @@ const bridge = window.telinha ?? null;
 
 let speaker = { id: '', label: '' };
 
+// Remove o código USB do fim do nome, ex.: "Fone (Astro A50) (9886:002c)".
+function cleanName(label) {
+  return String(label || '').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '').trim() || 'Dispositivo sem nome';
+}
+
 // Lista os dispositivos de áudio. As entradas "default"/"communications" do
 // Windows ficam de fora: a opção "Padrão do sistema" já cobre esse caso.
 export async function listDevices() {
@@ -10,7 +15,7 @@ export async function listDevices() {
     const all = await navigator.mediaDevices.enumerateDevices();
     const pick = (kind) => all
       .filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
-      .map((d) => ({ id: d.deviceId, label: d.label || 'Dispositivo sem nome' }));
+      .map((d) => ({ id: d.deviceId, label: d.label, name: cleanName(d.label) }));
     return { inputs: pick('audioinput'), outputs: pick('audiooutput') };
   } catch {
     return { inputs: [], outputs: [] };

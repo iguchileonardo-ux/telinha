@@ -427,7 +427,7 @@ async function renderAbout() {
 }
 
 function fillSelect(select, list, value) {
-  const options = [h('option', { value: '' }, 'Padrão do sistema'), ...list.map((d) => h('option', { value: d.id }, d.label))];
+  const options = [h('option', { value: '' }, 'Padrão do sistema'), ...list.map((d) => h('option', { value: d.id, title: d.name, dataset: { label: d.label } }, d.name))];
   if (value && !list.some((d) => d.id === value)) options.push(h('option', { value }, 'Dispositivo desconectado'));
   select.replaceChildren(...options);
   select.value = value || '';
@@ -502,7 +502,7 @@ async function saveSettingsFromDialog() {
     turnPass: $('setTurnPass').value,
     micId: $('setMic').value,
     speakerId: $('setSpeaker').value,
-    speakerLabel: $('setSpeaker').value ? $('setSpeaker').selectedOptions[0]?.textContent || '' : '',
+    speakerLabel: $('setSpeaker').value ? $('setSpeaker').selectedOptions[0]?.dataset.label || '' : '',
   };
   if (!next.name) { toast('O nome não pode ficar vazio.'); $('setName').focus(); return; }
   if (next.signaling === 'server' && !normalizeServerUrl(next.serverUrl)) {

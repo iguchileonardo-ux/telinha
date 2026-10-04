@@ -264,6 +264,7 @@ a:hover { text-decoration: underline; }
 .device-row svg { flex: none; }
 select {
   flex: 1;
+  width: 100%;
   min-width: 0;
   height: 40px;
   padding: 0 34px 0 13px;
@@ -281,7 +282,7 @@ select {
 select:hover { border-color: var(--line-strong); }
 select:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 select option { background: var(--surface-2); color: var(--text); }
-.field { display: grid; gap: 7px; }
+.field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; min-width: 0; }
 .field > span { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: 0.01em; }
 .field small, .advanced small, .about small { color: var(--faint); font-size: 12px; line-height: 1.5; }
 .grow { flex: 1; }
@@ -898,10 +899,11 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
   color: var(--text);
   border: 1px solid var(--line-strong);
   box-shadow: var(--shadow-strong);
+  overflow-x: hidden;
   overflow-y: auto;
 }
 .modal.wide { width: min(780px, calc(100vw - 32px)); }
-.modal[open] { display: grid; gap: 18px; animation: pop 0.22s var(--ease); }
+.modal[open] { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; animation: pop 0.22s var(--ease); }
 @keyframes pop { from { opacity: 0; transform: translateY(6px) scale(0.985); } }
 .modal::backdrop { background: var(--backdrop); backdrop-filter: blur(3px); }
 .modal-head { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
