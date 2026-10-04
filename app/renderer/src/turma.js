@@ -46,7 +46,16 @@ export const QUALITY = {
   RTCPeerConnection.prototype.__telinhaStereo = true;
 })();
 
-const RATE_LIMITS = { chat: [8, 5000], react: [6, 3000], img: [40, 10000], gallery: [10, 10000], drawreq: [3, 10000] };
+const RATE_LIMITS = { chat: [8, 5000], react: [6, 3000], img: [40, 10000], gallery: [10, 10000], drawreq: [3, 10000], relay: [200, 5000] };
+
+// Ponte: quando duas pessoas da turma não conseguem se conectar direto (redes
+// que bloqueiam a conexão), alguém conectado às duas repassa chat, presença,
+// voz e telas entre elas. Só entra em ação depois deste tempo sem conexão direta.
+const BRIDGE_DELAY_MS = 8000;
+const ACTIONS = ['hello', 'meta', 'chat', 'sync', 'chatbulk', 'imgget', 'img', 'gallery', 'react', 'ptr', 'stroke', 'drawreq', 'drawres', 'radio'];
+const RELAYABLE = new Set(ACTIONS);
+// Usado só nos testes automáticos, para simular duas pessoas sem conexão direta.
+const blocked = (peerId) => !!globalThis.__telinhaBlocked?.has?.(peerId);
 
 // Relays Nostr usados para os PCs se encontrarem. Lista fixa, testada:
 // os dois primeiros eram usados pela versão 2.1.0 e continuam aqui para que
@@ -83,6 +92,10 @@ export class TurmaSession extends EventTarget {
     this.sent = new Map(); // streamId -> Set(peerId) para quem a stream já foi enviada
     this.rate = new Map();
     this.radio = { v: 0, by: '', queue: [], current: null };
+    this.forwards = new Map(); // streams repassadas pela ponte
+    this.pairSince = new Map();
+    this.indirectSince = new Map();
+    this.pendingRelayStreams = new Map();
 
     const config = {
       appId: APP_ID,
@@ -104,12 +117,15 @@ export class TurmaSession extends EventTarget {
     }
 
     this.actions = {};
-    for (const name of ['hello', 'meta', 'chat', 'sync', 'chatbulk', 'imgget', 'img', 'gallery', 'react', 'ptr', 'stroke', 'drawreq', 'drawres', 'radio']) {
+    for (const name of [...ACTIONS, 'relay']) {
       const action = this.room.makeAction(name);
       action.onMessage = (data, ctx) => {
-        if (this.closed) return;
+        if (this.closed || blocked(ctx.peerId)) return;
         if (!this.#allowed(ctx.peerId, name)) return;
-        try { this.#handle(name, data, ctx.peerId); } catch (error) { console.warn(`Mensagem inválida (${name}):`, error); }
+        try {
+          if (name === 'relay') this.#onRelay(data, ctx.peerId);
+          else this.#handle(name, data, ctx.peerId);
+        } catch (error) { console.warn(`Mensagem inválida (${name}):`, error); }
       };
       this.actions[name] = action;
     }
@@ -284,7 +300,7 @@ export class TurmaSession extends EventTarget {
     const msg = { id: `${this.uid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, uid: this.uid, name: this.name, text: clean, ts: Date.now() };
     await store.addMessages(this.code, [msg]);
     this.#emit('messages', { messages: [msg] });
-    this.actions.chat.send(msg).catch(() => {});
+    this.#send('chat', msg);
     return msg;
   }
 
@@ -308,34 +324,34 @@ export class TurmaSession extends EventTarget {
     const item = { hash, by: this.uid, byName: this.name, ts: Date.now() };
     await store.addToGallery(this.code, [item]);
     this.#emit('gallery', {});
-    this.actions.img.send({ hash, data }).catch(() => {});
-    this.actions.gallery.send({ items: [item] }).catch(() => {});
+    this.#send('img', { hash, data });
+    this.#send('gallery', { items: [item] });
   }
 
   async removeReactionImage(hash) {
     const item = { hash, deleted: true, ts: Date.now() };
     await store.addToGallery(this.code, [item]);
     this.#emit('gallery', {});
-    this.actions.gallery.send({ items: [item] }).catch(() => {});
+    this.#send('gallery', { items: [item] });
   }
 
   sendReaction(hash) {
-    this.actions.react.send({ hash }).catch(() => {});
+    this.#send('react', { hash });
     this.#emit('reaction', { uid: this.uid, name: this.name, hash, self: true });
   }
 
   // ---- ponteiro e desenho ----
 
   sendPointer(targetPeerId, x, y) {
-    this.actions.ptr.send({ to: targetPeerId, x, y }, { target: this.#callPeerIds() }).catch(() => {});
+    this.#send('ptr', { to: targetPeerId, x, y }, this.#callPeerIds());
   }
 
   sendStroke(targetPeerId, stroke) {
-    this.actions.stroke.send({ to: targetPeerId, ...stroke }, { target: this.#callPeerIds() }).catch(() => {});
+    this.#send('stroke', { to: targetPeerId, ...stroke }, this.#callPeerIds());
   }
 
   requestDraw(targetPeerId) {
-    this.actions.drawreq.send({}, { target: targetPeerId }).catch(() => {});
+    this.#send('drawreq', {}, targetPeerId);
   }
 
   answerDraw(peerId, allow) {
@@ -343,7 +359,7 @@ export class TurmaSession extends EventTarget {
     if (!peer?.uid) return;
     if (allow) this.drawAllow.add(peer.uid);
     else this.drawAllow.delete(peer.uid);
-    this.actions.drawres.send({ allow }, { target: peerId }).catch(() => {});
+    this.#send('drawres', { allow }, peerId);
     this.#broadcastHello();
     this.#emit('peers', {});
   }
@@ -416,12 +432,144 @@ export class TurmaSession extends EventTarget {
         ? { streamId: this.share.stream.id, kind: this.share.kind, mode: this.share.mode, label: this.share.label, audio: !!this.share.stream.getAudioTracks().length }
         : null,
       drawAllow: [...this.drawAllow],
+      // Quem está conectado direto comigo (para a ponte).
+      links: [...this.peers.values()].filter((p) => !p.via && p.uid).map((p) => p.id).slice(0, 32),
     };
+  }
+
+  // Envia uma mensagem. target: id, lista de ids ou nada (todos).
+  // Quem não está conectado direto recebe pela ponte.
+  #send(name, data, target) {
+    const action = this.actions[name];
+    const ids = target === undefined || target === null ? null : [].concat(target);
+    const direct = [];
+    const bridged = [];
+    if (ids) {
+      for (const id of ids) {
+        const peer = this.peers.get(id);
+        if (peer?.via) bridged.push(peer);
+        else direct.push(id);
+      }
+      if (direct.length) action.send(data, { target: direct }).catch(() => {});
+    } else {
+      action.send(data).catch(() => {});
+      for (const peer of this.peers.values()) if (peer.via) bridged.push(peer);
+    }
+    for (const peer of bridged) {
+      this.actions.relay.send({ to: peer.id, name, data }, { target: peer.via }).catch(() => {});
+    }
+  }
+
+  #onRelay(data, fromPeerId) {
+    if (!data || typeof data.to !== 'string' || !RELAYABLE.has(data.name)) return;
+    if (data.to === this.selfId) {
+      const from = typeof data.from === 'string' ? data.from : '';
+      const bridge = this.peers.get(fromPeerId);
+      if (!from || from === this.selfId || !bridge || bridge.via) return;
+      if (!this.peers.has(from)) this.#virtual(from, fromPeerId);
+      if (!this.#allowed(from, data.name)) return;
+      this.#handle(data.name, data.data, from);
+      return;
+    }
+    // Sou a ponte: repasso para o destino, se ele estiver conectado direto comigo.
+    const target = this.peers.get(data.to);
+    const source = this.peers.get(fromPeerId);
+    if (!target || target.via || !source || source.via) return;
+    this.actions.relay.send({ to: data.to, from: fromPeerId, name: data.name, data: data.data }, { target: data.to }).catch(() => {});
+  }
+
+  #virtual(peerId, via) {
+    const peer = this.#peer(peerId);
+    peer.via = via;
+    const pending = this.pendingRelayStreams.get(peerId);
+    if (pending) {
+      for (const stream of pending) peer.streams.set(stream.id, stream);
+      this.pendingRelayStreams.delete(peerId);
+    }
+    return peer;
+  }
+
+  // Descobre quem só é alcançável pela ponte e cria/remove essas conexões indiretas.
+  #refreshBridges() {
+    const now = Date.now();
+    const directs = [...this.peers.values()].filter((p) => !p.via);
+    const directIds = new Set(directs.map((p) => p.id));
+    const candidates = new Map();
+    for (const p of directs) {
+      if (!p.uid || !p.links) continue;
+      for (const sid of p.links) {
+        if (sid === this.selfId || directIds.has(sid)) continue;
+        if (!candidates.has(sid)) candidates.set(sid, []);
+        candidates.get(sid).push(p);
+      }
+    }
+    for (const sid of [...this.indirectSince.keys()]) if (!candidates.has(sid)) this.indirectSince.delete(sid);
+    let changed = false;
+    for (const [sid, bridges] of candidates) {
+      if (!this.indirectSince.has(sid)) this.indirectSince.set(sid, now);
+      if (now - this.indirectSince.get(sid) < BRIDGE_DELAY_MS) continue;
+      const via = bridges.sort((a, b) => (a.uid < b.uid ? -1 : 1))[0].id;
+      const existing = this.peers.get(sid);
+      if (existing) {
+        if (existing.via !== via) { existing.via = via; changed = true; }
+      } else {
+        this.#virtual(sid, via);
+        this.#greet(sid);
+        changed = true;
+      }
+    }
+    for (const p of [...this.peers.values()]) {
+      if (!p.via) continue;
+      if (candidates.has(p.id) && this.peers.has(p.via)) continue;
+      if (!candidates.has(p.id) && this.peers.has(p.via) && now - p.joinedAt < 10000) continue;
+      this.peers.delete(p.id);
+      changed = true;
+    }
+    if (changed) {
+      this.#syncStreams();
+      this.#emit('peers', {});
+    }
+  }
+
+  // Como ponte, repasso voz e tela entre pessoas que não se conectam direto.
+  // Se houver mais de uma ponte possível, quem tem o menor id faz o repasse.
+  #syncForwards() {
+    const now = Date.now();
+    const wanted = new Map();
+    const pairs = new Set();
+    const directs = [...this.peers.values()].filter((p) => !p.via && p.uid && p.links);
+    for (const a of directs) {
+      for (const b of directs) {
+        if (a === b || a.links.includes(b.id) || b.links.includes(a.id)) continue;
+        const key = `${a.id}|${b.id}`;
+        pairs.add(key);
+        if (!this.pairSince.has(key)) this.pairSince.set(key, now);
+        if (now - this.pairSince.get(key) < BRIDGE_DELAY_MS || !a.inCall || !b.inCall) continue;
+        const common = directs.filter((q) => q !== a && q !== b && q.links.includes(a.id) && q.links.includes(b.id));
+        if (common.some((q) => q.uid < this.uid)) continue;
+        for (const [stream, kind] of [[this.micOf(a), 'mic'], [this.shareOf(a), a.sharing?.kind]]) {
+          if (stream) wanted.set(`${stream.id}>${b.id}`, { stream, target: b.id, kind, from: a.id });
+        }
+      }
+    }
+    for (const key of [...this.pairSince.keys()]) if (!pairs.has(key)) this.pairSince.delete(key);
+    for (const [key, f] of this.forwards) {
+      if (wanted.get(key)?.stream === f.stream) continue;
+      if (this.peers.has(f.target)) {
+        try { this.room.removeStream(f.stream, { target: f.target }); } catch { /* conexão já fechada */ }
+      }
+      this.forwards.delete(key);
+    }
+    for (const [key, f] of wanted) {
+      if (this.forwards.has(key)) continue;
+      this.room.addStream(f.stream, { target: f.target, metadata: { kind: f.kind, relayFrom: f.from } });
+      this.forwards.set(key, f);
+    }
   }
 
   #broadcastHello() {
     if (this.closed) return;
-    this.actions.hello.send(this.#hello()).catch(() => {});
+    this.#send('hello', this.#hello());
   }
 
   #peer(peerId) {
@@ -437,29 +585,57 @@ export class TurmaSession extends EventTarget {
   }
 
   async #onJoin(peerId) {
-    if (this.closed) return;
-    this.#peer(peerId);
-    this.actions.hello.send(this.#hello(), { target: peerId }).catch(() => {});
+    if (this.closed || blocked(peerId)) return;
+    const peer = this.#peer(peerId);
+    // Quem estava pela ponte agora conectou direto.
+    const wasBridged = !!peer.via;
+    if (wasBridged) peer.via = null;
+    await this.#greet(peerId);
+    if (wasBridged) this.#broadcastHello();
+  }
+
+  async #greet(peerId) {
+    this.#send('hello', this.#hello(), peerId);
     const turma = (await store.listTurmas()).find((t) => t.code === this.code);
     if (turma) this.#sendMeta(turma, peerId);
     const msgs = await store.messages(this.code);
     const gallery = await store.gallery(this.code);
-    this.actions.sync.send({
+    this.#send('sync', {
       have: msgs.slice(-300).map((m) => m.id),
       gallery: gallery.map(({ hash, by, byName, ts, deleted }) => ({ hash, by, byName, ts, deleted: !!deleted })),
-    }, { target: peerId }).catch(() => {});
+    }, peerId);
     if (this.radio.v) this.#sendRadio(undefined, peerId);
     this.#emit('peers', {});
   }
 
   #onLeave(peerId) {
-    if (!this.peers.delete(peerId)) return;
+    const peer = this.peers.get(peerId);
+    if (!peer || peer.via) return;
+    this.peers.delete(peerId);
     for (const set of this.sent.values()) set.delete(peerId);
+    this.#broadcastHello();
+    this.#refreshBridges();
+    this.#syncForwards();
     this.#emit('peers', {});
   }
 
-  #onStream(stream, peerId) {
-    if (this.closed) return;
+  #onStream(stream, peerId, metadata) {
+    if (this.closed || blocked(peerId)) return;
+    const relayFrom = metadata?.relayFrom;
+    if (typeof relayFrom === 'string' && relayFrom !== peerId) {
+      // Stream de outra pessoa, repassada pela ponte.
+      const owner = this.peers.get(relayFrom);
+      if (owner?.via) owner.streams.set(stream.id, stream);
+      else if (!owner) {
+        const list = this.pendingRelayStreams.get(relayFrom) || [];
+        this.pendingRelayStreams.set(relayFrom, [...list.slice(-3), stream]);
+        return;
+      } else return;
+      stream.addEventListener('addtrack', () => this.#emit('peers', {}));
+      stream.addEventListener('removetrack', () => this.#emit('peers', {}));
+      this.#emit('peers', {});
+      return;
+    }
     const peer = this.#peer(peerId);
     peer.streams.set(stream.id, stream);
     stream.addEventListener('addtrack', () => this.#emit('peers', {}));
@@ -499,6 +675,8 @@ export class TurmaSession extends EventTarget {
 
   #onHello(peer, data) {
     const before = { sharing: peer.sharing?.streamId, inCall: peer.inCall };
+    const firstHello = !peer.uid;
+    peer.links = Array.isArray(data.links) ? data.links.filter((x) => typeof x === 'string').slice(0, 32) : null;
     peer.uid = typeof data.uid === 'string' ? data.uid.slice(0, 32) : peer.uid;
     peer.name = typeof data.name === 'string' && data.name.trim() ? data.name.trim().slice(0, 32) : 'Sem nome';
     peer.avatar = typeof data.avatar === 'string' ? data.avatar.slice(0, 32) : '';
@@ -529,6 +707,8 @@ export class TurmaSession extends EventTarget {
       }
     }
     if (peer.avatar) this.#wantImages([peer.avatar], peer.id);
+    // Avisa os outros que agora tenho conexão direta com essa pessoa.
+    if (firstHello && !peer.via) this.#broadcastHello();
     this.#syncStreams();
     this.#emit('member', { uid: peer.uid, name: peer.name, avatar: peer.avatar });
     if (before.sharing !== peer.sharing?.streamId && peer.sharing && before.sharing === undefined) {
@@ -540,7 +720,7 @@ export class TurmaSession extends EventTarget {
   async #wantImages(hashes, peerId) {
     const have = new Set(await store.imageHashes());
     const missing = hashes.filter((h) => typeof h === 'string' && h && !have.has(h)).slice(0, 60);
-    if (missing.length) this.actions.imgget.send({ hashes: missing }, { target: peerId }).catch(() => {});
+    if (missing.length) this.#send('imgget', { hashes: missing }, peerId);
   }
 
   async #onImgGet(peerId, data) {
@@ -548,7 +728,7 @@ export class TurmaSession extends EventTarget {
     for (const hash of data.hashes.slice(0, 60)) {
       if (typeof hash !== 'string') continue;
       const img = hash === this.avatarHash && this.settings.avatar ? this.settings.avatar : await store.image(hash);
-      if (img) this.actions.img.send({ hash, data: img }, { target: peerId }).catch(() => {});
+      if (img) this.#send('img', { hash, data: img }, peerId);
     }
   }
 
@@ -577,7 +757,7 @@ export class TurmaSession extends EventTarget {
       const have = new Set(data.have);
       const mine = await store.messages(this.code);
       const missing = mine.slice(-300).filter((m) => !have.has(m.id));
-      if (missing.length) this.actions.chatbulk.send({ messages: missing }, { target: peerId }).catch(() => {});
+      if (missing.length) this.#send('chatbulk', { messages: missing }, peerId);
     }
     if (Array.isArray(data.gallery)) await this.#onGallery(peerId, { items: data.gallery });
   }
@@ -598,7 +778,7 @@ export class TurmaSession extends EventTarget {
 
   #sendMeta(turma, target) {
     const meta = { name: turma.name, nameTs: turma.nameTs || 0, pinned: turma.pinned || null };
-    this.actions.meta.send(meta, target ? { target } : undefined).catch(() => {});
+    this.#send('meta', meta, target);
   }
 
   async #onMeta(data) {
@@ -649,7 +829,7 @@ export class TurmaSession extends EventTarget {
   #sendRadio(position, target) {
     const state = { ...this.radio };
     if (state.current) state.current = { ...state.current, pos: position ?? this.radioPosition?.() ?? state.current.pos ?? 0 };
-    this.actions.radio.send(state, target ? { target } : undefined).catch(() => {});
+    this.#send('radio', state, target);
   }
 
   #onRadio(data) {
@@ -681,7 +861,7 @@ export class TurmaSession extends EventTarget {
       let set = this.sent.get(stream.id);
       if (!set) { set = new Set(); this.sent.set(stream.id, set); }
       for (const peer of this.peers.values()) {
-        const should = peer.inCall;
+        const should = peer.inCall && !peer.via;
         if (should && !set.has(peer.id)) {
           this.room.addStream(stream, { target: peer.id, metadata: { kind } });
           set.add(peer.id);
@@ -691,6 +871,7 @@ export class TurmaSession extends EventTarget {
         }
       }
     }
+    this.#syncForwards();
     if (this.share) setTimeout(() => this.#applyQuality(), 400);
   }
 
@@ -712,6 +893,8 @@ export class TurmaSession extends EventTarget {
       this.signalingOnline = online;
       this.#emit('signaling', { online });
     }
+    this.#refreshBridges();
+    this.#syncForwards();
     if (this.share) this.#applyQuality();
     this.#applyReceiverHints();
   }

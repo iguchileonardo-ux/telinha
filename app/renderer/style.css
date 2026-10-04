@@ -1020,4 +1020,7 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
+  /* Reações: sem movimento, só aparecem e somem suavemente. */
+  .float-reaction { animation: reaction-fade 2.8s linear forwards !important; }
 }
+@keyframes reaction-fade { 0% { opacity: 0; } 10%, 75% { opacity: 1; } 100% { opacity: 0; } }

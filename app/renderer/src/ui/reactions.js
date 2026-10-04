@@ -52,6 +52,8 @@ export class Reactions {
       name ? h('span', {}, self ? 'Você' : name) : null);
     el.style.setProperty('--drift', `${drift}px`);
     el.addEventListener('animationend', () => el.remove());
+    // Garante a saída mesmo sem animação (Windows com "Efeitos de animação" desligado).
+    setTimeout(() => el.remove(), 3200);
     this.layer.append(el);
   }
 
