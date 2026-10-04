@@ -24,14 +24,21 @@ echo.
 echo  Publicando a versao %VERSAO%. Isso leva alguns minutos.
 echo [%date% %time%] Publicando %VERSAO% > "%LOG%"
 
+rem Codigo no GitHub e marca da versao (a Release precisa dela).
+echo [git] >> "%LOG%"
+git add -A >> "%LOG%" 2>&1
+git commit -q -m "Versao %VERSAO%" >> "%LOG%" 2>&1
+git rev-parse --verify HEAD >nul 2>&1 || goto erro
+git branch -M main >> "%LOG%" 2>&1
+git push -u origin main >> "%LOG%" 2>&1 || goto erro
+git tag -f "v%VERSAO%" >> "%LOG%" 2>&1
+git push -f origin "v%VERSAO%" >> "%LOG%" 2>&1 || goto erro
+
+echo [build] >> "%LOG%"
 call npm install --no-audit --no-fund >> "%LOG%" 2>&1 || goto erro
 if not exist "node_modules\electron\dist\electron.exe" call node "node_modules\electron\install.js" >> "%LOG%" 2>&1
 call npm run publicar >> "%LOG%" 2>&1 || goto erro
 set "GH_TOKEN="
-
-git add -A >nul 2>nul
-git commit -q -m "Versao %VERSAO%" >nul 2>nul
-git push -q >nul 2>nul
 
 call "%~dp0ferramentas\separar-instalador.bat" >nul 2>&1
 echo  Versao %VERSAO% publicada.

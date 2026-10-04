@@ -56,6 +56,7 @@ export class CallView {
   }
 
   detach() {
+    this.#stopMuteWatch();
     this.stage.clear();
     for (const sink of this.sinks.values()) this.#dropSink(sink);
     this.sinks.clear();
@@ -112,11 +113,12 @@ export class CallView {
     people.classList.toggle('compact', screens.length > 0);
     if (session.inCall) {
       const me = { uid: settings.userId, name: settings.name || 'Você', hash: session.avatarHash, muted: session.muted, sharing: session.sharing, me: true };
-      const everyone = [me, ...inCall.map((p) => ({ uid: p.uid, name: p.name, hash: p.avatar, muted: p.muted, sharing: !!p.sharing }))];
+      const everyone = [me, ...inCall.map((p) => ({ uid: p.uid, name: p.name, hash: p.avatar, muted: p.muted, sharing: !!p.sharing, net: p.net }))];
       const size = people.classList.contains('compact') ? 30 : 76;
-      people.replaceChildren(...everyone.map((m) => h(`div.person${this.speaking.has(m.uid) ? '.speaking' : ''}`, { title: m.name },
+      people.replaceChildren(...everyone.map((m) => h(`div.person${this.speaking.has(m.uid) ? '.speaking' : ''}`, { title: personTitle(m) },
         avatar(m, size),
         h('span.person-name', {}, m.me ? 'Você' : m.name),
+        netBadge(m.net),
         m.muted ? h('span.person-muted', { title: 'Sem microfone' }, icon('micOff', 13)) : null)));
     }
 
@@ -153,6 +155,37 @@ export class CallView {
     }));
 
     this.#renderRequests();
+    this.#muteWatch(session);
+  }
+
+  // Avisa quando a pessoa fala com o microfone desligado.
+  #muteWatch(session) {
+    const track = session.micStream?.getAudioTracks()[0];
+    const want = session.inCall && session.muted && track?.readyState === 'live';
+    if (!want) { this.#stopMuteWatch(); return; }
+    if (this.muteSource === track) return;
+    this.#stopMuteWatch();
+    const clone = track.clone();
+    clone.enabled = true;
+    this.muteSource = track;
+    this.muteTrack = clone;
+    let since = 0;
+    this.muteStop = watchLevel(new MediaStream([clone]), (level) => {
+      if (level < 0.08) { since = 0; return; }
+      since ||= performance.now();
+      if (performance.now() - since > 800 && Date.now() - (this.muteWarned || 0) > 30000) {
+        this.muteWarned = Date.now();
+        toast('Seu microfone está desligado. Aperte M para falar.', 3500);
+      }
+    });
+  }
+
+  #stopMuteWatch() {
+    this.muteStop?.();
+    this.muteTrack?.stop();
+    this.muteStop = null;
+    this.muteTrack = null;
+    this.muteSource = null;
   }
 
   setShareInfo(label, stream) {
@@ -281,4 +314,23 @@ export class CallView {
       h('button.btn.ghost.small', { type: 'button', on: { click: () => { session?.answerDraw(peerId, false); this.requests.delete(peerId); this.#renderRequests(); } } }, 'Recusar'),
       h('button.btn.primary.small', { type: 'button', on: { click: () => { session?.answerDraw(peerId, true); this.requests.delete(peerId); this.#renderRequests(); } } }, 'Permitir'))));
   }
+}
+
+// ---------- qualidade da conexão ----------
+
+const PATH_TEXT = { direto: 'conexão direta', turn: 'pelo servidor TURN', ponte: 'pela ponte' };
+const LEVEL_TEXT = { ok: 'Conexão boa', warn: 'Conexão instável', bad: 'Conexão ruim' };
+
+function personTitle(m) {
+  if (m.me || !m.net) return m.name;
+  const parts = [LEVEL_TEXT[m.net.level], PATH_TEXT[m.net.path]];
+  if (m.net.rtt != null) parts.push(`${m.net.rtt} ms`);
+  if (m.net.loss >= 0.01) parts.push(`${Math.round(m.net.loss * 100)}% de perda`);
+  return `${m.name}\n${parts.join(' · ')}`;
+}
+
+// Só aparece quando há algo a notar: conexão instável/ruim ou pela ponte.
+function netBadge(net) {
+  if (!net || (net.level === 'ok' && net.path !== 'ponte')) return null;
+  return h(`span.person-net.${net.level}`, {}, net.path === 'ponte' ? icon('link', 10) : null);
 }

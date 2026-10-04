@@ -15,7 +15,8 @@ import { CallView } from './ui/call.js';
 import { Reactions } from './ui/reactions.js';
 import { Radio, youtubeId } from './ui/radio.js';
 import { Members } from './ui/members.js';
-import { listDevices, setSpeaker } from './devices.js';
+import { listDevices, setSpeaker, micConstraints } from './devices.js';
+import { watchLevel } from './audio.js';
 
 let settings = loadSettings();
 let turmas = [];
@@ -201,6 +202,43 @@ async function joinByCode(code) {
   }
 }
 
+// ---------- conexão ----------
+
+let openToken = 0;
+let serverInfo = null;
+const nostrFallback = new Set(); // turmas que, nesta execução, usam os relays públicos
+
+// Decide como a turma se conecta: servidor da Telinha (com TURN) ou relays públicos.
+async function networkConfig(code) {
+  if (settings.signaling === 'server') return { builtinServer: null, extraIce: await turnServers() };
+  serverInfo ??= bridge ? await bridge.appInfo().catch(() => null) : (window.__telinhaServer || null);
+  const server = serverInfo?.server || '';
+  return {
+    builtinServer: server && !nostrFallback.has(code) ? server : null,
+    extraIce: await turnServers(),
+  };
+}
+
+async function turnServers() {
+  try {
+    if (bridge?.turnServers) return (await bridge.turnServers()) || [];
+    return window.__telinhaServer?.iceServers || [];
+  } catch {
+    return [];
+  }
+}
+
+// Se o servidor da Telinha não responder, usa os relays públicos nesta turma.
+function watchBuiltin(s) {
+  if (s.mode !== 'builtin') return;
+  setTimeout(() => {
+    if (session !== s || s.signalingOnline || s.peers.size) return;
+    nostrFallback.add(s.code);
+    const code = s.code;
+    closeSession().then(() => openTurma(code));
+  }, 12000);
+}
+
 async function openTurma(code) {
   if (!ensureName()) { pendingCode = code; return; }
   pendingCode = null;
@@ -210,9 +248,13 @@ async function openTurma(code) {
 
   const turma = turmas.find((t) => t.code === code);
   if (!turma) return;
+  const token = ++openToken;
+  const network = await networkConfig(code);
+  // Outra turma foi aberta enquanto as credenciais chegavam.
+  if (token !== openToken || session) return;
   let next;
   try {
-    next = new TurmaSession({ code, settings });
+    next = new TurmaSession({ code, settings, ...network });
   } catch (error) {
     toast(error.message);
     openSettings();
@@ -231,6 +273,7 @@ async function openTurma(code) {
   }));
 
   wireSession(session);
+  watchBuiltin(session);
   call.attach(session);
   radio.attach(session);
   await preloadImages(Object.values(turma.members || {}).map((m) => m.avatar));
@@ -398,7 +441,7 @@ const QUALITY_HINT = {
   movie: 'Ideal para filmes: 24 quadros por segundo, som estéreo e um pouco mais de buffer para não travar.',
 };
 const SIGNALING_HINT = {
-  auto: 'Usa relays públicos para encontrar seus amigos. Não precisa configurar nada.',
+  auto: 'Usa o servidor da Telinha para encontrar seus amigos e, se ele estiver fora do ar, relays públicos. Não precisa configurar nada.',
   server: 'Usa o seu servidor de sinalização. Todos na turma precisam usar o mesmo.',
 };
 
@@ -448,6 +491,29 @@ async function fillDevices(keepSelection = false) {
   fillSelect($('setSpeaker'), outputs, keepSelection ? $('setSpeaker').value : settings.speakerId);
 }
 
+// Barrinha de nível do microfone nas configurações.
+let micTest = null;
+async function startMicTest() {
+  stopMicTest();
+  const id = $('setMic').value;
+  const token = {};
+  micTest = token;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(id), video: false });
+  } catch {
+    return;
+  }
+  if (micTest !== token || !$('settings').open) { stream.getTracks().forEach((t) => t.stop()); return; }
+  const bar = $('micMeter').firstElementChild;
+  const stop = watchLevel(stream, (level) => { bar.style.transform = `scaleX(${level.toFixed(3)})`; });
+  token.stop = () => { stop(); stream.getTracks().forEach((t) => t.stop()); bar.style.transform = 'scaleX(0)'; };
+}
+function stopMicTest() {
+  micTest?.stop?.();
+  micTest = null;
+}
+
 function openSettings() {
   pendingAvatar = undefined;
   $('setName').value = settings.name;
@@ -463,7 +529,7 @@ function openSettings() {
   $('connDetails').open = settings.signaling !== 'auto' || !!settings.turnUrl;
   syncSettingsHints();
   renderAbout();
-  fillDevices();
+  fillDevices().then(startMicTest);
   $('settings').showModal();
 }
 
@@ -621,6 +687,8 @@ function bind() {
   // configurações
   $('settingsBtn').addEventListener('click', openSettings);
   $('settingsClose').addEventListener('click', () => $('settings').close());
+  $('settings').addEventListener('close', stopMicTest);
+  $('setMic').addEventListener('change', startMicTest);
   $('settingsCancel').addEventListener('click', () => $('settings').close());
   $('settingsSave').addEventListener('click', saveSettingsFromDialog);
   $('setAvatar').addEventListener('click', async () => {

@@ -6,3 +6,5 @@ server/node_modules/
 teste-log*.txt
 instalador-log.txt
 publicar-log.txt
+servidor-log.txt
+.wrangler/

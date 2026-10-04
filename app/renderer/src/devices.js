@@ -28,14 +28,29 @@ export function micConstraints(micId) {
   return micId ? { ...base, deviceId: { exact: micId } } : base;
 }
 
+// Saída em uso: a escolhida, ou a padrão enquanto ela estiver desconectada.
+let effective = '';
+
 export function applySink(el) {
   if (typeof el?.setSinkId !== 'function') return;
-  if (el.sinkId === speaker.id) return;
-  el.setSinkId(speaker.id).catch(() => {
-    // Saída desconectada: volta para a padrão.
-    if (speaker.id) el.setSinkId('').catch(() => {});
+  if (el.sinkId === effective) return;
+  el.setSinkId(effective).catch(() => {
+    if (effective) el.setSinkId('').catch(() => {});
   });
 }
+
+async function refreshEffective() {
+  let next = speaker.id;
+  if (next) {
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => null);
+    if (devices && !devices.some((d) => d.kind === 'audiooutput' && d.deviceId === next)) next = '';
+  }
+  if (next === effective) return;
+  effective = next;
+  applyAll();
+}
+
+navigator.mediaDevices?.addEventListener?.('devicechange', () => refreshEffective());
 
 function applyAll() {
   document.querySelectorAll('audio, video').forEach(applySink);
@@ -43,7 +58,9 @@ function applyAll() {
 
 export function setSpeaker(id, label) {
   speaker = { id: id || '', label: id ? label || '' : '' };
+  effective = speaker.id;
   applyAll();
+  refreshEffective();
   bridge?.radioCommand('sink', speaker.label).catch(() => {});
 }
 

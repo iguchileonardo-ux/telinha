@@ -197,7 +197,9 @@ function setupIpc() {
     updates: !!updateRepo(),
     updateReady,
     packaged: app.isPackaged,
+    server: builtinServer(),
   }));
+  ipcMain.handle('app:turn', () => turnServers());
   ipcMain.handle('app:focus', () => {
     if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
     return true;
@@ -233,8 +235,37 @@ function setupIpc() {
 
 // ---- atualização automática (GitHub Releases) ----
 
+// Servidor da Telinha (pasta servidor-cloudflare), configurado em package.json.
+function builtinServer() {
+  const url = String(pkg.telinha?.server || '').trim().replace(/\/$/, '');
+  return url ? url.replace(/^https:/i, 'wss:').replace(/^http:/i, 'ws:') : '';
+}
+
+// Credenciais temporárias do TURN, pedidas ao servidor e guardadas até perto de vencer.
+let turnCache = null;
+async function turnServers() {
+  const server = builtinServer();
+  if (!server) return [];
+  if (turnCache && turnCache.expires - Date.now() > 60 * 60 * 1000) return turnCache.iceServers;
+  try {
+    const url = `${server.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:')}/turn`;
+    const res = await net.fetch(url, { headers: { 'x-telinha': 'telinha-app-v1-7d3f91c2' }, signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return turnCache?.iceServers || [];
+    const data = await res.json();
+    const iceServers = Array.isArray(data.iceServers) ? data.iceServers.filter((x) => x && x.urls).slice(0, 6) : [];
+    turnCache = { iceServers, expires: Number(data.expires) || Date.now() + 12 * 60 * 60 * 1000 };
+    return iceServers;
+  } catch {
+    return turnCache?.iceServers || [];
+  }
+}
+
+// Repositório das atualizações. O valor fixo garante que nenhuma versão saia
+// sem atualização automática, mesmo se o package.json vier sem ele.
+const DEFAULT_UPDATE_REPO = 'iguchileonardo-ux/telinha';
+
 function updateRepo() {
-  const repo = String(pkg.telinha?.updateRepo || '').trim();
+  const repo = String(pkg.telinha?.updateRepo || DEFAULT_UPDATE_REPO).trim();
   return /^[\w.-]+\/[\w.-]+$/.test(repo) ? repo : null;
 }
 

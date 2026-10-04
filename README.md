@@ -96,16 +96,27 @@ Sem Node instalado, o `testar.bat` baixa uma versão portátil e abre duas inst�
 
 ## Conexão
 
-O vídeo e a voz vão direto de um computador para o outro (WebRTC, criptografado de ponta a ponta). Para se encontrarem, a Telinha usa:
+O vídeo e a voz vão direto de um computador para o outro (WebRTC, criptografado de ponta a ponta). Para se encontrarem, a Telinha usa, nesta ordem:
 
-| Modo | Como funciona |
+| Caminho | Quando |
 | --- | --- |
-| **Automática** (padrão) | Relays públicos da rede Nostr, por meio da biblioteca [Trystero](https://github.com/dmotz/trystero). |
-| **Servidor próprio** | O servidor da pasta `server/`, hospedado por você (Render, Fly etc.). |
+| **Servidor da Telinha** (pasta `servidor-cloudflare/`) | Padrão. Roda de graça no Cloudflare. |
+| **Relays públicos Nostr** | Reserva automática, se o servidor não responder em 12 segundos. |
+| **Servidor escolhido** | Configurações → Conexão → Servidor próprio. |
 
-Todos na turma precisam usar o mesmo modo. As mensagens de conexão são cifradas com uma chave derivada do código da turma.
+Quando duas redes não aceitam conexão direta (CGNAT, 4G, redes corporativas), a Telinha usa:
 
-Algumas redes (CGNAT, 4G, redes corporativas) bloqueiam a conexão direta. Para esses casos dá para configurar um servidor **TURN** em **Configurações → Conexão**.
+- **TURN do Cloudflare:** repassa o tráfego dessas duas pessoas. As credenciais são temporárias e as chaves ficam só no servidor.
+- **Ponte:** se o TURN não estiver disponível, alguém da turma conectado às duas pessoas repassa chat, voz e telas.
+
+**Para colocar o servidor no ar:** dois cliques em `Configurar servidor.bat`. Ele faz o login no Cloudflare pelo navegador, publica o servidor, grava o endereço no `package.json` e, se você quiser, configura o TURN. Depois, rode `Publicar atualizacao.bat`.
+
+### Quedas e diagnóstico na call
+
+- **Queda de conexão:** se alguém cai sem sair (Wi-Fi, hibernação), a Telinha tenta reconectar sozinha por até 10 minutos, sem derrubar os outros.
+- **Fone desconectado:** o microfone muda para o padrão do sistema e volta para o escolhido quando o fone é religado. O mesmo vale para a saída de áudio.
+- **Qualidade da conexão:** passe o mouse sobre uma pessoa na call para ver o atraso, a perda e o caminho (direto, TURN ou ponte). Um ponto amarelo ou vermelho aparece quando a conexão está instável ou ruim.
+- **Microfone:** em Configurações, a barrinha embaixo do microfone mostra se ele está captando. Se você falar com o microfone desligado, a Telinha avisa.
 
 ## Limitações conhecidas
 

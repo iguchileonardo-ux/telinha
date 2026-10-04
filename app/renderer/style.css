@@ -260,6 +260,8 @@ a:hover { text-decoration: underline; }
 .chip:hover { color: var(--text); border-color: var(--line-strong); }
 
 /* ---------- campos ---------- */
+.mic-meter { height: 4px; margin: -2px 0 2px 26px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.mic-meter i { display: block; height: 100%; width: 100%; background: var(--ok); transform-origin: left; transform: scaleX(0); transition: transform 0.08s linear; }
 .device-row { display: flex; align-items: center; gap: 10px; color: var(--muted); }
 .device-row svg { flex: none; }
 select {
@@ -664,6 +666,24 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
   padding: 0;
   z-index: 4;
 }
+.person-net {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  margin-left: -38px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--surface);
+  background: var(--ok);
+  color: #10131a;
+}
+.person-net.warn { background: #f2c14e; }
+.person-net.bad { background: #f06a6a; }
+.people.compact .person-net { top: -3px; margin-left: -18px; width: 12px; height: 12px; border-width: 1.5px; }
+.people.compact .person-net svg { display: none; }
 .people.compact .person { gap: 0; }
 .people.compact .person-name { display: none; }
 .people.compact .person-muted { top: auto; bottom: -4px; right: -4px; width: 16px; height: 16px; border-width: 1.5px; }

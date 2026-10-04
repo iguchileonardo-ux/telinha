@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('telinha', {
   // app
   setTheme: (theme) => ipcRenderer.invoke('app:theme', theme),
   appInfo: () => ipcRenderer.invoke('app:info'),
+  turnServers: () => ipcRenderer.invoke('app:turn'),
   focus: () => ipcRenderer.invoke('app:focus'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdateReady: (callback) => listen('update:ready', callback),

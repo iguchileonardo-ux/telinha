@@ -2,8 +2,9 @@
 // desenho e rádio. Tudo direto entre os computadores (WebRTC via Trystero).
 //
 // Sinalização:
-//   - 'auto':   relays públicos da rede Nostr, sem servidor próprio;
-//   - 'server': servidor WebSocket próprio (pasta server/ do projeto).
+//   - 'builtin': servidor da Telinha no Cloudflare (padrão quando configurado);
+//   - 'auto':    relays públicos da rede Nostr (reserva, se o servidor falhar);
+//   - 'server':  servidor escolhido nas configurações.
 import {
   joinRoom as joinNostr,
   getRelaySockets as nostrSockets,
@@ -52,7 +53,10 @@ const RATE_LIMITS = { chat: [8, 5000], react: [6, 3000], img: [40, 10000], galle
 // que bloqueiam a conexão), alguém conectado às duas repassa chat, presença,
 // voz e telas entre elas. Só entra em ação depois deste tempo sem conexão direta.
 const BRIDGE_DELAY_MS = 8000;
-const ACTIONS = ['hello', 'meta', 'chat', 'sync', 'chatbulk', 'imgget', 'img', 'gallery', 'react', 'ptr', 'stroke', 'drawreq', 'drawres', 'radio'];
+const ACTIONS = ['hello', 'meta', 'chat', 'sync', 'chatbulk', 'imgget', 'img', 'gallery', 'react', 'ptr', 'stroke', 'drawreq', 'drawres', 'radio', 'bye'];
+// Tentativas de reencontrar quem caiu sem avisar (queda de internet, Wi-Fi, hibernação).
+const RECONNECT_DELAYS = [3000, 8000, 20000, 45000, 60000];
+const RECONNECT_GIVE_UP = 10 * 60 * 1000;
 const RELAYABLE = new Set(ACTIONS);
 // Usado só nos testes automáticos, para simular duas pessoas sem conexão direta.
 const blocked = (peerId) => !!globalThis.__telinhaBlocked?.has?.(peerId);
@@ -72,7 +76,9 @@ const NOSTR_RELAYS = [
 ];
 
 export class TurmaSession extends EventTarget {
-  constructor({ code, settings }) {
+  // builtinServer: servidor da Telinha (wss://...) ou null para usar os relays Nostr.
+  // extraIce: servidores TURN fornecidos pelo servidor da Telinha.
+  constructor({ code, settings, builtinServer = null, extraIce = [] }) {
     super();
     this.code = code;
     this.settings = settings;
@@ -96,11 +102,13 @@ export class TurmaSession extends EventTarget {
     this.pairSince = new Map();
     this.indirectSince = new Map();
     this.pendingRelayStreams = new Map();
+    this.lost = new Map(); // uid -> tentativas de reconexão
+    this.byes = new Set(); // quem saiu de propósito
 
     const config = {
       appId: APP_ID,
       password: `telinha:${code}`,
-      rtcConfig: { iceServers: iceServers(settings) },
+      rtcConfig: { iceServers: [...iceServers(settings), ...extraIce] },
     };
     const callbacks = { onJoinError: (details) => this.#emit('join-error', details) };
 
@@ -109,6 +117,10 @@ export class TurmaSession extends EventTarget {
       if (!url) throw new Error('Informe o endereço do servidor próprio nas configurações.');
       this.mode = 'server';
       this.room = joinRelay({ ...config, relayConfig: { urls: [url] } }, code, callbacks);
+      this.sockets = relaySockets;
+    } else if (builtinServer) {
+      this.mode = 'builtin';
+      this.room = joinRelay({ ...config, relayConfig: { urls: [builtinServer] } }, code, callbacks);
       this.sockets = relaySockets;
     } else {
       this.mode = 'auto';
@@ -133,6 +145,11 @@ export class TurmaSession extends EventTarget {
     this.room.onPeerJoin = (peerId) => this.#onJoin(peerId);
     this.room.onPeerLeave = (peerId) => this.#onLeave(peerId);
     this.room.onPeerStream = (stream, peerId, metadata) => this.#onStream(stream, peerId, metadata);
+
+    this.onOnline = () => this.#kickSignaling(true);
+    window.addEventListener('online', this.onOnline);
+    this.onDeviceChange = () => this.#deviceChanged();
+    navigator.mediaDevices?.addEventListener?.('devicechange', this.onDeviceChange);
 
     this.timer = setInterval(() => this.#tick(), 2000);
     this.#tick();
@@ -221,12 +238,38 @@ export class TurmaSession extends EventTarget {
       }
       if (this.closed || !this.inCall) { stream.getTracks().forEach((t) => t.stop()); return; }
       this.micStream = stream;
-      stream.getAudioTracks().forEach((t) => { t.enabled = !this.muted; });
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = !this.muted;
+        // Fone desconectado ou sem bateria: troca para o microfone padrão sozinho.
+        t.addEventListener('ended', () => this.#onMicEnded(stream));
+      });
     } catch (error) {
       this.muted = true;
       this.#emit('notice', { text: 'Não foi possível usar o microfone. Você entrou na call sem microfone.' });
       console.warn('Microfone indisponível:', error);
     }
+  }
+
+  // O microfone escolhido voltou (fone religado): volta a usar ele.
+  async #deviceChanged() {
+    if (this.closed || !this.inCall || !this.micStream || !this.micId) return;
+    const current = this.micStream.getAudioTracks()[0];
+    if (current?.readyState === 'live' && current.getSettings?.().deviceId === this.micId) return;
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    const back = devices.find((d) => d.kind === 'audioinput' && d.deviceId === this.micId);
+    if (!back) return;
+    await this.setMicDevice(this.micId);
+    this.#emit('notice', { text: `Microfone de volta: ${back.label.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, '') || 'microfone escolhido'}.` });
+  }
+
+  async #onMicEnded(stream) {
+    if (this.closed || this.micStream !== stream || !this.inCall) return;
+    const chosen = this.micId;
+    this.micId = '';
+    this.#emit('notice', { text: 'O microfone foi desconectado. Usando o microfone padrão do sistema.' });
+    await this.setMicDevice('');
+    // Mantém a escolha: quando o microfone voltar, a próxima call já usa ele.
+    this.micId = chosen;
   }
 
   // Troca o microfone sem sair da call.
@@ -390,6 +433,12 @@ export class TurmaSession extends EventTarget {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.timer);
+    window.removeEventListener('online', this.onOnline);
+    for (const entry of this.lost.values()) clearTimeout(entry.timer);
+    this.lost.clear();
+    // Avisa que é uma saída de propósito, para ninguém ficar tentando reconectar.
+    await Promise.race([this.actions.bye.send({}).catch(() => {}), new Promise((r) => setTimeout(r, 300))]);
+    navigator.mediaDevices?.removeEventListener?.('devicechange', this.onDeviceChange);
     for (const stream of [this.share?.stream, this.micStream]) stream?.getTracks().forEach((t) => t.stop());
     this.share = null;
     this.micStream = null;
@@ -466,9 +515,12 @@ export class TurmaSession extends EventTarget {
       const from = typeof data.from === 'string' ? data.from : '';
       const bridge = this.peers.get(fromPeerId);
       if (!from || from === this.selfId || !bridge || bridge.via) return;
-      if (!this.peers.has(from)) this.#virtual(from, fromPeerId);
+      const known = this.peers.has(from);
+      if (!known) this.#virtual(from, fromPeerId);
       if (!this.#allowed(from, data.name)) return;
       this.#handle(data.name, data.data, from);
+      // A outra pessoa começou a falar comigo pela ponte antes de eu perceber: me apresento.
+      if (!known) this.#greet(from);
       return;
     }
     // Sou a ponte: repasso para o destino, se ele estiver conectado direto comigo.
@@ -476,6 +528,40 @@ export class TurmaSession extends EventTarget {
     const source = this.peers.get(fromPeerId);
     if (!target || target.via || !source || source.via) return;
     this.actions.relay.send({ to: data.to, from: fromPeerId, name: data.name, data: data.data }, { target: data.to }).catch(() => {});
+  }
+
+  // Alguém caiu sem avisar: reconecta a sinalização algumas vezes. Isso faz os dois
+  // lados se anunciarem de novo e refazerem a conexão, sem derrubar os outros.
+  #lostPeer(uid) {
+    if (this.closed || this.lost.has(uid)) return;
+    const entry = { since: Date.now(), tries: 0, timer: null };
+    this.lost.set(uid, entry);
+    const attempt = () => {
+      if (this.closed || this.lost.get(uid) !== entry) return;
+      if (this.peerByUid(uid) || Date.now() - entry.since > RECONNECT_GIVE_UP) { this.lost.delete(uid); return; }
+      this.#kickSignaling();
+      entry.tries += 1;
+      entry.timer = setTimeout(attempt, RECONNECT_DELAYS[Math.min(entry.tries, RECONNECT_DELAYS.length - 1)]);
+    };
+    entry.timer = setTimeout(attempt, RECONNECT_DELAYS[0]);
+  }
+
+  #found(uid) {
+    const entry = this.lost.get(uid);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.lost.delete(uid);
+  }
+
+  #kickSignaling(force = false) {
+    const now = Date.now();
+    if (!force && now - (this.lastKick || 0) < 2500) return;
+    this.lastKick = now;
+    try {
+      for (const ws of Object.values(this.sockets() || {})) {
+        if (ws?.readyState === WebSocket.OPEN) ws.close();
+      }
+    } catch { /* sem sockets */ }
   }
 
   #virtual(peerId, via) {
@@ -612,6 +698,8 @@ export class TurmaSession extends EventTarget {
     const peer = this.peers.get(peerId);
     if (!peer || peer.via) return;
     this.peers.delete(peerId);
+    if (peer.uid && !this.byes.has(peerId)) this.#lostPeer(peer.uid);
+    this.byes.delete(peerId);
     for (const set of this.sent.values()) set.delete(peerId);
     this.#broadcastHello();
     this.#refreshBridges();
@@ -669,6 +757,7 @@ export class TurmaSession extends EventTarget {
         this.#emit('draw-response', { peerId, allow: data.allow === true, name: peer.name });
         return;
       case 'radio': return this.#onRadio(data);
+      case 'bye': this.byes.add(peerId); return;
       default:
     }
   }
@@ -676,6 +765,7 @@ export class TurmaSession extends EventTarget {
   #onHello(peer, data) {
     const before = { sharing: peer.sharing?.streamId, inCall: peer.inCall };
     const firstHello = !peer.uid;
+    if (typeof data.uid === 'string') this.#found(data.uid.slice(0, 32));
     peer.links = Array.isArray(data.links) ? data.links.filter((x) => typeof x === 'string').slice(0, 32) : null;
     peer.uid = typeof data.uid === 'string' ? data.uid.slice(0, 32) : peer.uid;
     peer.name = typeof data.name === 'string' && data.name.trim() ? data.name.trim().slice(0, 32) : 'Sem nome';
@@ -897,6 +987,56 @@ export class TurmaSession extends EventTarget {
     this.#syncForwards();
     if (this.share) this.#applyQuality();
     this.#applyReceiverHints();
+    this.ticks = (this.ticks || 0) + 1;
+    if (this.ticks % 2 === 0) this.#measure();
+  }
+
+  // Mede a conexão com cada pessoa: atraso (ms), perda de pacotes e o caminho
+  // (direto, pelo servidor TURN ou pela ponte). Resultado em peer.net.
+  async #measure() {
+    const connections = this.#connections();
+    let changed = false;
+    for (const peer of this.peers.values()) {
+      if (peer.via) continue;
+      const pc = connections[peer.id];
+      if (!pc?.getStats) continue;
+      let stats;
+      try { stats = await pc.getStats(); } catch { continue; }
+      let pair = null;
+      let received = 0;
+      let lost = 0;
+      const byId = new Map();
+      stats.forEach((r) => {
+        byId.set(r.id, r);
+        if (r.type === 'candidate-pair' && (r.selected || (r.nominated && r.state === 'succeeded'))) pair = pair || r;
+        if (r.type === 'inbound-rtp' && r.kind === 'audio') { received += r.packetsReceived || 0; lost += r.packetsLost || 0; }
+      });
+      stats.forEach((r) => {
+        if (r.type === 'transport' && r.selectedCandidatePairId && byId.has(r.selectedCandidatePairId)) pair = byId.get(r.selectedCandidatePairId);
+      });
+      const prev = peer.netRaw || { received: 0, lost: 0 };
+      const dr = Math.max(0, received - prev.received);
+      const dl = Math.max(0, lost - prev.lost);
+      peer.netRaw = { received, lost };
+      const loss = dr + dl > 20 ? dl / (dr + dl) : (peer.net?.loss ?? 0);
+      const rtt = pair?.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : (peer.net?.rtt ?? null);
+      const local = pair && byId.get(pair.localCandidateId);
+      const remote = pair && byId.get(pair.remoteCandidateId);
+      const path = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'direto';
+      const level = rtt == null ? 'ok' : (rtt > 350 || loss > 0.08) ? 'bad' : (rtt > 180 || loss > 0.03) ? 'warn' : 'ok';
+      const before = peer.net;
+      peer.net = { rtt, loss, path, level };
+      if (!before || before.level !== level || before.path !== path || Math.abs((before.rtt ?? 0) - (rtt ?? 0)) > 40) changed = true;
+    }
+    for (const peer of this.peers.values()) {
+      if (!peer.via) continue;
+      const bridge = this.peers.get(peer.via)?.net;
+      const level = bridge?.level || 'ok';
+      const before = peer.net;
+      peer.net = { rtt: bridge?.rtt ?? null, loss: bridge?.loss ?? 0, path: 'ponte', level };
+      if (!before || before.level !== level || before.path !== 'ponte') changed = true;
+    }
+    if (changed) this.#emit('peers', {});
   }
 
   #connections() {
