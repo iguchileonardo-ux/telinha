@@ -22,7 +22,11 @@ export const defaults = {
   turnUser: '',
   turnPass: '',
   notifications: true, // avisos do Windows quando a janela está em segundo plano
-  sounds: true, // sons discretos de entrada, saída, transmissão e mensagem
+  sounds: true, // sons do aplicativo (liga e desliga tudo)
+  soundsPeople: true, // outras pessoas: entrar, sair e transmitir
+  soundsSelf: true, // ações suas: microfone, call e transmissão
+  soundsChat: true, // mensagens e reações
+  soundsSystem: true, // conexão e avisos do aplicativo
   tray: true, // fechar a janela mantém a Telinha na bandeja
   autostart: false, // abrir com o Windows (escondida na bandeja)
 };

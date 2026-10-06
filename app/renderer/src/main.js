@@ -17,11 +17,12 @@ import { Radio, youtubeId } from './ui/radio.js';
 import { Members } from './ui/members.js';
 import { listDevices, setSpeaker, micConstraints } from './devices.js';
 import { watchLevel } from './audio.js';
-import { createAlerts } from './alerts.js';
+import { createAlerts, scheduleSound, SOUNDS, SOUND_GROUPS } from './alerts.js';
 
 let settings = loadSettings();
-const alerts = createAlerts(() => settings);
+const alerts = createAlerts(() => settings, (text) => diag(text));
 let appVersion = '';
+let sessionOpenedAt = 0;
 let turmas = [];
 let current = null; // Turma aberta
 let session = null;
@@ -82,7 +83,7 @@ const app = {
   speaking: () => call.speaking.size > 0,
   onSpeakingChange: () => scheduleRender(),
   toggleShare: () => toggleShare(),
-  send: (text) => session?.sendMessage(text),
+  send: (text) => { alerts.sound('sent'); return session?.sendMessage(text); },
   pin: (msg) => session?.setMeta({ pinned: { id: msg.id, text: msg.text, name: msg.name } }),
   unpin: () => session?.setMeta({ pinned: null }),
   command: async (text) => {
@@ -299,6 +300,7 @@ async function openTurma(code) {
   }));
 
   wireSession(session);
+  sessionOpenedAt = Date.now();
   diag(`Sessão iniciada na turma "${turma.name || 'sem nome'}", versão ${appVersion || 'desconhecida'}, modo ${session.mode || 'desconhecido'}.`);
   watchBuiltin(session);
   call.attach(session);
@@ -325,10 +327,25 @@ async function closeSession() {
 function wireSession(s) {
   const mine = (fn) => (e) => { if (session === s) fn(e.detail); };
   s.addEventListener('peers', mine(() => scheduleRender()));
-  s.addEventListener('call', mine(() => scheduleRender()));
-  s.addEventListener('signaling', mine(() => scheduleRender()));
-  s.addEventListener('notice', mine((d) => toast(d.text, 5000)));
+  let selfInCall = false;
+  let signalingSeen = false;
+  s.addEventListener('call', mine((d) => {
+    if (d.inCall !== selfInCall) {
+      selfInCall = d.inCall;
+      alerts.sound(d.inCall ? 'selfCallJoin' : 'selfCallLeave');
+    }
+    scheduleRender();
+  }));
+  s.addEventListener('muted', mine((d) => alerts.sound(d.muted ? 'muteOn' : 'muteOff')));
+  s.addEventListener('signaling', mine((d) => {
+    // O primeiro aviso é só a conexão inicial; depois disso, queda e volta.
+    if (signalingSeen) alerts.sound(d.online ? 'connBack' : 'connLost');
+    else if (d.online) signalingSeen = true;
+    scheduleRender();
+  }));
+  s.addEventListener('notice', mine((d) => { alerts.sound('notice'); toast(d.text, 5000); }));
   s.addEventListener('share', mine((d) => {
+    alerts.sound(d.sharing ? 'selfShareStart' : 'selfShareStop');
     if (!d.sharing) endShareExtras();
     scheduleRender();
   }));
@@ -345,12 +362,17 @@ function wireSession(s) {
     scheduleRender();
   }));
   s.addEventListener('log', mine((d) => diag(d.text)));
+  s.addEventListener('peer-presence', mine((d) => {
+    // Ao abrir a turma, quem já estava lá não conta como alguém que chegou.
+    if (Date.now() - sessionOpenedAt > 6000) alerts.sound(d.present ? 'peerJoin' : 'peerLeave');
+  }));
   s.addEventListener('peer-call', mine((d) => {
-    if (session?.inCall) alerts.sound(d.inCall ? 'join' : 'leave');
+    if (session?.inCall) alerts.sound(d.inCall ? 'callJoin' : 'callLeave');
     if (d.inCall) alerts.notify({ title: current?.name || 'Telinha', body: `${d.peer.name || 'Alguém'} entrou na call`, tab: 'call' });
   }));
+  s.addEventListener('stopped-sharing', mine(() => alerts.sound('shareStop')));
   s.addEventListener('started-sharing', mine((d) => {
-    alerts.sound('share');
+    alerts.sound('shareStart');
     alerts.notify({ title: current?.name || 'Telinha', body: `${d.peer.name || 'Alguém'} começou a transmitir`, tab: 'call' });
   }));
   s.addEventListener('meta', mine((d) => {
@@ -366,7 +388,10 @@ function wireSession(s) {
     chat.render();
     scheduleRender();
   }));
-  s.addEventListener('reaction', mine((d) => reactions.show(d)));
+  s.addEventListener('reaction', mine((d) => {
+    if (!d.self) alerts.sound('reaction');
+    reactions.show(d);
+  }));
   s.addEventListener('member', mine(async (d) => {
     if (!d.uid) return;
     const prev = current?.members?.[d.uid];
@@ -562,6 +587,12 @@ function stopMicTest() {
   micTest = null;
 }
 
+// Com os sons desligados, as opções por grupo ficam desativadas.
+function syncSoundSwitches() {
+  const on = $('setSounds').checked;
+  for (const group of Object.keys(SOUND_GROUPS)) $(`setSounds-${group}`).disabled = !on;
+}
+
 function openSettings() {
   pendingAvatar = undefined;
   $('setName').value = settings.name;
@@ -578,6 +609,8 @@ function openSettings() {
   $('appField').hidden = !bridge;
   $('setNotify').checked = settings.notifications;
   $('setSounds').checked = settings.sounds;
+  for (const [group, key] of Object.entries(SOUND_GROUPS)) $(`setSounds-${group}`).checked = settings[key] !== false;
+  syncSoundSwitches();
   $('setTray').checked = settings.tray;
   $('setAutostart').checked = settings.autostart;
   syncSettingsHints();
@@ -634,6 +667,7 @@ async function saveSettingsFromDialog() {
     ...(bridge ? {
       notifications: $('setNotify').checked,
       sounds: $('setSounds').checked,
+      ...Object.fromEntries(Object.entries(SOUND_GROUPS).map(([group, key]) => [key, $(`setSounds-${group}`).checked])),
       tray: $('setTray').checked,
       autostart: $('setAutostart').checked,
     } : {}),
@@ -768,6 +802,12 @@ function bind() {
       syncSettingsHints();
     });
   }
+  // Amostra ao ligar um som, para o usuário saber como ele é.
+  const sample = { people: 'callJoin', self: 'muteOff', chat: 'message', system: 'connBack' };
+  $('setSounds').addEventListener('change', (e) => { syncSoundSwitches(); if (e.target.checked) alerts.sound('callJoin', { force: true }); });
+  for (const group of Object.keys(SOUND_GROUPS)) {
+    $(`setSounds-${group}`).addEventListener('change', (e) => { if (e.target.checked) alerts.sound(sample[group], { force: true }); });
+  }
   $('audioToggle').addEventListener('change', (e) => {
     if (!e.target.disabled) app.saveSettings({ shareAudio: e.target.checked });
   });
@@ -795,6 +835,7 @@ function bind() {
   bridge?.onUpdateReady((version) => {
     updateReady = version;
     $('updateDot').hidden = false;
+    alerts.sound('update');
     toast(`Atualização ${version} pronta. Ela será aplicada quando a Telinha reiniciar.`, 6000);
   });
 }
@@ -836,6 +877,6 @@ async function start() {
 }
 
 // Atalho para testes automatizados no navegador.
-window.__telinha = { app, get session() { return session; }, radio, youtubeId };
+window.__telinha = { app, get session() { return session; }, radio, youtubeId, alerts, scheduleSound, SOUNDS };
 
 start();

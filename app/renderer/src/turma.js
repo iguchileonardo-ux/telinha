@@ -272,12 +272,14 @@ export class TurmaSession extends EventTarget {
   }
 
   async setMuted(muted) {
+    const changed = this.muted !== muted;
     this.muted = muted;
     if (!muted && !this.micStream) await this.#ensureMic();
     this.micStream?.getAudioTracks().forEach((t) => { t.enabled = !this.muted; });
     this.#syncStreams();
     this.#broadcastHello();
     this.#emit('call', { inCall: this.inCall });
+    if (changed) this.#emit('muted', { muted });
   }
 
   async #ensureMic() {
@@ -786,6 +788,8 @@ export class TurmaSession extends EventTarget {
     this.peers.delete(peerId);
     this.#log(`${peer.name || shortId(peerId)} (${shortId(peerId)}) saiu da turma${this.byes.has(peerId) ? '' : ' sem avisar'}.`);
     if (peer.inCall && peer.uid) this.#emit('peer-call', { peer, inCall: false });
+    if (peer.sharing) this.#emit('stopped-sharing', { peer });
+    if (peer.uid) this.#emit('peer-presence', { peer, present: false });
     if (peer.uid && !this.byes.has(peerId)) this.#lostPeer(peer.uid);
     this.byes.delete(peerId);
     for (const set of this.sent.values()) set.delete(peerId);
@@ -923,9 +927,11 @@ export class TurmaSession extends EventTarget {
     this.#syncStreams();
     this.#checkRouted(peer.id);
     this.#emit('member', { uid: peer.uid, name: peer.name, avatar: peer.avatar });
+    if (firstHello && !peer.via && peer.uid) this.#emit('peer-presence', { peer, present: true });
     if (before.sharing !== peer.sharing?.streamId && peer.sharing && before.sharing === undefined) {
       this.#emit('started-sharing', { peer });
     }
+    if (before.sharing !== undefined && !peer.sharing) this.#emit('stopped-sharing', { peer });
     if (!firstHello && before.inCall !== peer.inCall && peer.uid) {
       this.#log(`${this.#who(peer.id)} ${peer.inCall ? 'entrou na' : 'saiu da'} call.`);
       this.#emit('peer-call', { peer, inCall: peer.inCall });
