@@ -21,6 +21,10 @@ export const defaults = {
   turnUrl: '',
   turnUser: '',
   turnPass: '',
+  notifications: true, // avisos do Windows quando a janela está em segundo plano
+  sounds: true, // sons discretos de entrada, saída, transmissão e mensagem
+  tray: true, // fechar a janela mantém a Telinha na bandeja
+  autostart: false, // abrir com o Windows (escondida na bandeja)
 };
 
 function read(key, fallback) {

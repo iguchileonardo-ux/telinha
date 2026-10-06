@@ -34,4 +34,11 @@ contextBridge.exposeInMainWorld('telinha', {
   writeClipboard: (text) => ipcRenderer.invoke('clipboard:write', text),
   pendingLink: () => ipcRenderer.invoke('link:pending'),
   onLink: (callback) => listen('open-link', callback),
+  // bandeja, notificações e registro de diagnóstico
+  setPrefs: (prefs) => ipcRenderer.invoke('app:prefs', prefs),
+  notify: (data) => ipcRenderer.invoke('notify:show', data),
+  onNotifyClick: (callback) => listen('notify:click', callback),
+  onDnd: (callback) => listen('app:dnd', callback),
+  writeLog: (lines) => ipcRenderer.invoke('log:write', lines),
+  openLog: () => ipcRenderer.invoke('log:open'),
 });

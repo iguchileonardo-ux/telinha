@@ -17,8 +17,11 @@ import { Radio, youtubeId } from './ui/radio.js';
 import { Members } from './ui/members.js';
 import { listDevices, setSpeaker, micConstraints } from './devices.js';
 import { watchLevel } from './audio.js';
+import { createAlerts } from './alerts.js';
 
 let settings = loadSettings();
+const alerts = createAlerts(() => settings);
+let appVersion = '';
 let turmas = [];
 let current = null; // Turma aberta
 let session = null;
@@ -30,6 +33,29 @@ let starting = false;
 let updateReady = null;
 let pendingAvatar; // undefined = sem mudança, '' = remover, string = nova foto
 const reportedErrors = new Set();
+
+// ---------- registro de diagnóstico ----------
+// Texto simples gravado no PC (diagnostico.txt). Abre clicando na versão, no
+// rodapé das configurações. Não guarda mensagens nem o código das turmas.
+
+const diagBuffer = [];
+function diag(text) {
+  if (!bridge?.writeLog) return;
+  diagBuffer.push(`[${new Date().toLocaleString('sv-SE')}] ${text}`);
+  if (diagBuffer.length > 400) diagBuffer.splice(0, diagBuffer.length - 400);
+  if (diagBuffer.length >= 50) flushDiag();
+}
+function flushDiag() {
+  if (!bridge?.writeLog || !diagBuffer.length) return;
+  bridge.writeLog(diagBuffer.splice(0, 200)).catch(() => {});
+}
+
+function pushPrefs() {
+  if (!bridge?.setPrefs) return;
+  bridge.setPrefs({ notifications: settings.notifications, tray: settings.tray, autostart: settings.autostart })
+    .then((state) => alerts.setDnd(state?.dnd))
+    .catch(() => {});
+}
 
 // ---------- serviços compartilhados ----------
 
@@ -273,6 +299,7 @@ async function openTurma(code) {
   }));
 
   wireSession(session);
+  diag(`Sessão iniciada na turma "${turma.name || 'sem nome'}", versão ${appVersion || 'desconhecida'}, modo ${session.mode || 'desconhecido'}.`);
   watchBuiltin(session);
   call.attach(session);
   radio.attach(session);
@@ -287,6 +314,8 @@ async function closeSession() {
   const old = session;
   if (!old) return;
   session = null;
+  diag('Sessão encerrada.');
+  flushDiag();
   endShareExtras();
   call.detach();
   radio.detach();
@@ -306,7 +335,23 @@ function wireSession(s) {
   s.addEventListener('messages', mine((d) => {
     chat.append(d.messages);
     if (tab !== 'chat' && d.messages.some((m) => m.uid !== settings.userId)) unread = true;
+    // Histórico recebido ao entrar não avisa: só mensagens de agora.
+    const incoming = d.messages.filter((m) => m.uid !== settings.userId && Date.now() - (m.ts || 0) < 20000);
+    if (incoming.length) {
+      if (tab !== 'chat' || !document.hasFocus()) alerts.sound('message');
+      const last = incoming[incoming.length - 1];
+      alerts.notify({ title: last.name || 'Telinha', body: last.text, tab: 'chat', flash: true });
+    }
     scheduleRender();
+  }));
+  s.addEventListener('log', mine((d) => diag(d.text)));
+  s.addEventListener('peer-call', mine((d) => {
+    if (session?.inCall) alerts.sound(d.inCall ? 'join' : 'leave');
+    if (d.inCall) alerts.notify({ title: current?.name || 'Telinha', body: `${d.peer.name || 'Alguém'} entrou na call`, tab: 'call' });
+  }));
+  s.addEventListener('started-sharing', mine((d) => {
+    alerts.sound('share');
+    alerts.notify({ title: current?.name || 'Telinha', body: `${d.peer.name || 'Alguém'} começou a transmitir`, tab: 'call' });
   }));
   s.addEventListener('meta', mine((d) => {
     current = d.turma;
@@ -469,7 +514,10 @@ function renderAvatarPick(el, data, name) {
 async function renderAbout() {
   const about = $('about');
   const info = bridge ? await bridge.appInfo().catch(() => null) : null;
-  const parts = [h('span', {}, `Telinha ${info?.version || ''}`.trim())];
+  const parts = [h('span.about-version', {
+    title: bridge ? 'Abrir o registro de diagnóstico' : '',
+    on: { click: () => bridge?.openLog?.() },
+  }, `Telinha ${info?.version || ''}`.trim())];
   if (updateReady || info?.updateReady) {
     parts.push(h('button.btn.primary.small', { type: 'button', on: { click: () => bridge?.installUpdate() } }, 'Reiniciar e atualizar'));
   } else if (info?.packaged) {
@@ -527,6 +575,11 @@ function openSettings() {
   $('setTurnUser').value = settings.turnUser;
   $('setTurnPass').value = settings.turnPass;
   $('connDetails').open = settings.signaling !== 'auto' || !!settings.turnUrl;
+  $('appField').hidden = !bridge;
+  $('setNotify').checked = settings.notifications;
+  $('setSounds').checked = settings.sounds;
+  $('setTray').checked = settings.tray;
+  $('setAutostart').checked = settings.autostart;
   syncSettingsHints();
   renderAbout();
   fillDevices().then(startMicTest);
@@ -578,6 +631,12 @@ async function saveSettingsFromDialog() {
     micId: $('setMic').value,
     speakerId: $('setSpeaker').value,
     speakerLabel: $('setSpeaker').value ? $('setSpeaker').selectedOptions[0]?.dataset.label || '' : '',
+    ...(bridge ? {
+      notifications: $('setNotify').checked,
+      sounds: $('setSounds').checked,
+      tray: $('setTray').checked,
+      autostart: $('setAutostart').checked,
+    } : {}),
   };
   if (!next.name) { toast('O nome não pode ficar vazio.'); $('setName').focus(); return; }
   if (next.signaling === 'server' && !normalizeServerUrl(next.serverUrl)) {
@@ -596,6 +655,7 @@ async function saveSettingsFromDialog() {
   const speakerChanged = next.speakerId !== settings.speakerId;
   settings = next;
   saveSettings(settings);
+  pushPrefs();
   applyTheme();
   $('nameInput').value = settings.name;
   $('settings').close();
@@ -728,6 +788,10 @@ function bind() {
     const code = parseRoomCode(link);
     if (code) joinByCode(code);
   });
+  bridge?.onDnd?.((value) => alerts.setDnd(value));
+  bridge?.onNotifyClick?.((d) => { if (session) setTab(d?.tab === 'call' ? 'call' : 'chat'); });
+  setInterval(flushDiag, 5000);
+  window.addEventListener('beforeunload', flushDiag);
   bridge?.onUpdateReady((version) => {
     updateReady = version;
     $('updateDot').hidden = false;
@@ -760,7 +824,8 @@ async function start() {
     await store.putImage(hash, settings.avatar);
   }
   renderAvatarPick($('welcomeAvatar'), settings.avatar, settings.name);
-  if (bridge) bridge.appInfo().then((info) => { if (info?.updateReady) { updateReady = info.updateReady; $('updateDot').hidden = false; } }).catch(() => {});
+  pushPrefs();
+  if (bridge) bridge.appInfo().then((info) => { appVersion = info?.version || ''; if (info?.updateReady) { updateReady = info.updateReady; $('updateDot').hidden = false; } }).catch(() => {});
 
   const link = bridge ? await bridge.pendingLink() : new URLSearchParams(location.search).get('sala');
   const code = link ? parseRoomCode(link) : null;

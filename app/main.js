@@ -1,14 +1,20 @@
-// Processo principal do Electron: janela, captura, links telinha://, camada de
-// ponteiro/desenho, rádio e atualização automática.
+// Processo principal do Electron: janela, bandeja, notificações, captura, links
+// telinha://, camada de ponteiro/desenho, rádio e atualização automática.
 const {
   app,
   BrowserWindow,
+  Menu,
+  Notification,
+  Tray,
   clipboard,
   desktopCapturer,
   ipcMain,
+  nativeImage,
+  net,
   session,
   shell,
 } = require('electron');
+const fs = require('node:fs');
 const path = require('node:path');
 const audio = require('./audio');
 const native = require('./native');
@@ -26,6 +32,19 @@ let win = null;
 let pendingLink = null;
 let pendingSource = null;
 let updateReady = null;
+let tray = null;
+let quitting = false;
+let dnd = false; // não incomodar: vale só até fechar o app
+let lastNote = { key: '', at: 0 };
+let currentNote = null;
+
+// Preferências que o processo principal precisa conhecer antes da interface
+// carregar (bandeja e início com o Windows). A interface envia as mudanças.
+const DEFAULT_PREFS = { notifications: true, tray: true, autostart: false, trayNoticeShown: false };
+let prefs = { ...DEFAULT_PREFS };
+const prefsFile = () => path.join(app.getPath('userData'), 'preferencias.json');
+const logFile = () => path.join(app.getPath('userData'), 'diagnostico.txt');
+const LOG_LIMIT = 1024 * 1024;
 
 // Permite tocar o áudio dos amigos e o rádio sem precisar clicar antes.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -59,6 +78,138 @@ function send(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
 
+function readPrefs() {
+  try {
+    const data = JSON.parse(fs.readFileSync(prefsFile(), 'utf8'));
+    for (const key of Object.keys(DEFAULT_PREFS)) if (typeof data[key] === 'boolean') prefs[key] = data[key];
+  } catch { /* primeira execução */ }
+}
+
+function savePrefs() {
+  try { fs.writeFileSync(prefsFile(), JSON.stringify(prefs)); } catch (error) { console.log('Preferências:', error.message); }
+}
+
+function showWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function windowInBackground() {
+  return !win || win.isDestroyed() || !win.isVisible() || win.isMinimized() || !win.isFocused();
+}
+
+// ---- bandeja ----
+
+function trayMenu() {
+  return Menu.buildFromTemplate([
+    { label: 'Abrir a Telinha', click: showWindow },
+    { label: 'Não incomodar', type: 'checkbox', checked: dnd, click: (item) => setDnd(item.checked) },
+    { type: 'separator' },
+    { label: 'Sair', click: () => app.quit() },
+  ]);
+}
+
+function setDnd(value) {
+  dnd = !!value;
+  if (tray) tray.setContextMenu(trayMenu());
+  send('app:dnd', dnd);
+}
+
+function syncTray() {
+  if (prefs.tray && !tray) {
+    try {
+      const file = path.join(__dirname, 'icon.png');
+      const image = fs.existsSync(file) ? nativeImage.createFromPath(file).resize({ width: 32, height: 32 }) : nativeImage.createEmpty();
+      tray = new Tray(image);
+      tray.setToolTip('Telinha');
+      tray.setContextMenu(trayMenu());
+      tray.on('click', showWindow);
+    } catch (error) {
+      console.log('Bandeja indisponível:', error.message);
+      tray = null;
+    }
+  } else if (!prefs.tray && tray) {
+    tray.destroy();
+    tray = null;
+    if (win && !win.isDestroyed() && !win.isVisible()) showWindow();
+  }
+}
+
+// Só vale para a versão instalada: em desenvolvimento não mexe no registro do Windows.
+function syncAutostart() {
+  if (!app.isPackaged || process.platform !== 'win32' || profile) return;
+  try { app.setLoginItemSettings({ openAtLogin: !!prefs.autostart, args: ['--oculto'] }); } catch (error) { console.log('Início com o Windows:', error.message); }
+}
+
+function applyPrefs(patch) {
+  if (patch && typeof patch === 'object') {
+    for (const key of ['notifications', 'tray', 'autostart']) if (typeof patch[key] === 'boolean') prefs[key] = patch[key];
+  }
+  savePrefs();
+  syncTray();
+  syncAutostart();
+}
+
+// ---- avisos do sistema ----
+
+function notify({ title, body, tab, flash } = {}) {
+  if (!prefs.notifications || dnd || !windowInBackground()) return false;
+  const text = String(body || '').slice(0, 200);
+  const head = String(title || 'Telinha').slice(0, 80);
+  const key = `${head}|${text}`;
+  const now = Date.now();
+  if (key === lastNote.key && now - lastNote.at < 3000) return false;
+  lastNote = { key, at: now };
+  if (flash && win && !win.isDestroyed() && win.isVisible()) win.flashFrame(true);
+  if (!Notification.isSupported()) return false;
+  try {
+    if (currentNote) currentNote.close();
+    const note = new Notification({ title: head, body: text, silent: true, icon: path.join(__dirname, 'icon.png') });
+    note.on('click', () => { showWindow(); send('notify:click', { tab: tab === 'call' ? 'call' : 'chat' }); });
+    note.on('close', () => { if (currentNote === note) currentNote = null; });
+    currentNote = note;
+    note.show();
+    return true;
+  } catch (error) {
+    console.log('Notificação:', error.message);
+    return false;
+  }
+}
+
+// Aviso único de que fechar a janela não encerra o app.
+function trayNotice() {
+  if (prefs.trayNoticeShown || !Notification.isSupported()) return;
+  prefs.trayNoticeShown = true;
+  savePrefs();
+  try {
+    new Notification({
+      title: 'A Telinha continua aberta',
+      body: 'Ela fica na bandeja do Windows. Para sair de vez, clique com o botão direito no ícone e escolha Sair.',
+      silent: true,
+    }).show();
+  } catch { /* sem aviso */ }
+}
+
+// ---- registro de diagnóstico ----
+
+async function writeLog(lines) {
+  if (!Array.isArray(lines) || !lines.length) return false;
+  const text = lines.slice(0, 200).map((l) => String(l).replace(/[\u0000-\u001f]/g, ' ').slice(0, 500)).join('\n') + '\n';
+  const file = logFile();
+  try {
+    try {
+      if ((await fs.promises.stat(file)).size > LOG_LIMIT) await fs.promises.rename(file, file.replace(/\.txt$/, '.antigo.txt'));
+    } catch { /* ainda não existe */ }
+    await fs.promises.appendFile(file, text, 'utf8');
+    return true;
+  } catch (error) {
+    console.log('Registro:', error.message);
+    return false;
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1180,
@@ -80,7 +231,16 @@ function createWindow() {
     },
   });
 
-  win.once('ready-to-show', () => win.show());
+  const startHidden = process.argv.includes('--oculto') && prefs.tray && tray && !pendingLink;
+  win.once('ready-to-show', () => { if (!startHidden) win.show(); });
+  // Com a bandeja ligada, fechar a janela só a esconde: a call e a transmissão continuam.
+  win.on('close', (event) => {
+    if (quitting || !prefs.tray || !tray) return;
+    event.preventDefault();
+    win.hide();
+    trayNotice();
+  });
+  win.on('focus', () => win.flashFrame(false));
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -200,8 +360,19 @@ function setupIpc() {
     server: builtinServer(),
   }));
   ipcMain.handle('app:turn', () => turnServers());
-  ipcMain.handle('app:focus', () => {
-    if (win && !win.isDestroyed()) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+  ipcMain.handle('app:focus', () => { showWindow(); return true; });
+
+  // Preferências do aplicativo (bandeja, início com o Windows, notificações)
+  ipcMain.handle('app:prefs', (_event, patch) => {
+    applyPrefs(patch);
+    return { dnd };
+  });
+  ipcMain.handle('notify:show', (_event, data) => notify(data || {}));
+  ipcMain.handle('log:write', (_event, lines) => writeLog(lines));
+  ipcMain.handle('log:open', async () => {
+    const file = logFile();
+    if (fs.existsSync(file)) shell.showItemInFolder(file);
+    else await shell.openPath(app.getPath('userData'));
     return true;
   });
 
@@ -227,6 +398,7 @@ function setupIpc() {
 
   ipcMain.handle('update:install', () => {
     if (!updateReady) return false;
+    quitting = true;
     const { autoUpdater } = require('electron-updater');
     setImmediate(() => autoUpdater.quitAndInstall(true, true));
     return true;
@@ -306,7 +478,7 @@ if (!profile && !app.requestSingleInstanceLock()) {
   app.on('second-instance', (_event, argv) => {
     const link = findLink(argv);
     if (link) deliverLink(link);
-    else if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+    else showWindow();
   });
 
   app.on('open-url', (event, url) => {
@@ -316,8 +488,11 @@ if (!profile && !app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     if (!profile) registerProtocol();
+    readPrefs();
     setupMedia();
     setupIpc();
+    syncTray();
+    syncAutostart();
     createWindow();
     setupUpdater();
 
@@ -326,7 +501,7 @@ if (!profile && !app.requestSingleInstanceLock()) {
     });
   });
 
-  app.on('before-quit', () => { audio.stop(); overlay.stop(); radio.stop(); });
+  app.on('before-quit', () => { quitting = true; audio.stop(); overlay.stop(); radio.stop(); });
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
