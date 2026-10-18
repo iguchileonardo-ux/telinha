@@ -41,6 +41,7 @@ const reportedErrors = new Set();
 
 const diagBuffer = [];
 function diag(text) {
+  globalThis.__telinhaDiag?.(text); // usado só nos testes automáticos
   if (!bridge?.writeLog) return;
   diagBuffer.push(`[${new Date().toLocaleString('sv-SE')}] ${text}`);
   if (diagBuffer.length > 400) diagBuffer.splice(0, diagBuffer.length - 400);
@@ -255,15 +256,57 @@ async function turnServers() {
   }
 }
 
-// Se o servidor da Telinha não responder, usa os relays públicos nesta turma.
-function watchBuiltin(s) {
-  if (s.mode !== 'builtin') return;
-  setTimeout(() => {
+// Testa se o servidor da Telinha aceita conexão (WebSocket aberto em até 6 s).
+function probeServer(url) {
+  return new Promise((resolve) => {
+    let ws;
+    const done = (ok) => { clearTimeout(timer); try { ws?.close(); } catch { /* já fechado */ } resolve(ok); };
+    const timer = setTimeout(() => done(false), 6000);
+    try {
+      ws = new WebSocket(url);
+      ws.onopen = () => done(true);
+      ws.onerror = () => done(false);
+    } catch {
+      done(false);
+    }
+  });
+}
+
+// Se o servidor da Telinha não responder, usa os relays públicos nesta turma. Só troca quando
+// o computador está com internet e o servidor de fato não responde: antes, 12 s sem resposta
+// (comum logo depois de ligar o PC ou de voltar da suspensão) bastavam, e a pessoa ficava nos
+// relays públicos, separada dos amigos, até reiniciar a Telinha.
+function watchBuiltin(s, server) {
+  if (s.mode !== 'builtin' || !server) return;
+  const check = async () => {
     if (session !== s || s.signalingOnline || s.peers.size) return;
+    if (navigator.onLine === false || await probeServer(server)) {
+      // Sem internet, ou o servidor responde e a conexão só está demorando: espera mais.
+      setTimeout(check, 10000);
+      return;
+    }
+    if (session !== s || s.signalingOnline || s.peers.size) return;
+    diag('O servidor da Telinha não respondeu; usando os relays públicos nesta turma.');
     nostrFallback.add(s.code);
     const code = s.code;
     closeSession().then(() => openTurma(code));
-  }, 12000);
+  };
+  setTimeout(check, 12000);
+}
+
+// Nos relays públicos, volta para o servidor da Telinha assim que ele responder de novo
+// (fora da call, para não derrubar ninguém).
+function watchFallback(s, server) {
+  if (s.mode !== 'auto' || !server || !nostrFallback.has(s.code)) return;
+  const timer = setInterval(async () => {
+    if (session !== s) { clearInterval(timer); return; }
+    if (s.inCall || !(await probeServer(server)) || session !== s || s.inCall) return;
+    clearInterval(timer);
+    diag('O servidor da Telinha voltou a responder; saindo dos relays públicos.');
+    nostrFallback.delete(s.code);
+    const code = s.code;
+    closeSession().then(() => openTurma(code));
+  }, 30000);
 }
 
 async function openTurma(code) {
@@ -302,7 +345,8 @@ async function openTurma(code) {
   wireSession(session);
   sessionOpenedAt = Date.now();
   diag(`Sessão iniciada na turma "${turma.name || 'sem nome'}", versão ${appVersion || 'desconhecida'}, modo ${session.mode || 'desconhecido'}.`);
-  watchBuiltin(session);
+  watchBuiltin(session, serverInfo?.server || '');
+  watchFallback(session, serverInfo?.server || '');
   call.attach(session);
   radio.attach(session);
   await preloadImages(Object.values(turma.members || {}).map((m) => m.avatar));
@@ -337,10 +381,13 @@ function wireSession(s) {
     scheduleRender();
   }));
   s.addEventListener('muted', mine((d) => alerts.sound(d.muted ? 'muteOn' : 'muteOff')));
+  let signalingLostAt = 0;
   s.addEventListener('signaling', mine((d) => {
     // O primeiro aviso é só a conexão inicial; depois disso, queda e volta.
     if (signalingSeen) alerts.sound(d.online ? 'connBack' : 'connLost');
     else if (d.online) signalingSeen = true;
+    if (!d.online) { signalingLostAt = Date.now(); diag('Sem conexão com o servidor de sinalização.'); }
+    else diag(signalingLostAt ? `Conexão com o servidor de sinalização de volta após ${Math.round((Date.now() - signalingLostAt) / 1000)} s.` : 'Conectado ao servidor de sinalização.');
     scheduleRender();
   }));
   s.addEventListener('notice', mine((d) => { alerts.sound('notice'); toast(d.text, 5000); }));
@@ -405,6 +452,7 @@ function wireSession(s) {
   }));
   s.addEventListener('join-error', mine((d) => {
     const id = d?.peerId || 'geral';
+    diag(`Falha ao conectar com ${String(d?.peerId || '?').slice(0, 4)}: ${String(d?.error || 'erro desconhecido').slice(0, 200)}`);
     if (reportedErrors.has(id)) return;
     reportedErrors.add(id);
     const name = s.peers.get(id)?.name;

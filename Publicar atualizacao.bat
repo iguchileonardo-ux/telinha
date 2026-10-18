@@ -37,7 +37,15 @@ git push -f origin "v%VERSAO%" >> "%LOG%" 2>&1 || goto erro
 echo [build] >> "%LOG%"
 call npm install --no-audit --no-fund >> "%LOG%" 2>&1 || goto erro
 if not exist "node_modules\electron\dist\electron.exe" call node "node_modules\electron\install.js" >> "%LOG%" 2>&1
+rem Cria a Release antes do envio. Sem isso o electron-builder pode criar duas
+rem Releases para a mesma versao e a atualizacao automatica deixa de funcionar.
+echo [release] >> "%LOG%"
+gh release view "v%VERSAO%" >nul 2>&1 || gh release create "v%VERSAO%" --title "%VERSAO%" --notes "Versao %VERSAO%." >> "%LOG%" 2>&1
 call npm run publicar >> "%LOG%" 2>&1 || goto erro
+
+rem Confere se ficou uma Release so e se o latest.yml esta acessivel.
+echo [conferencia] >> "%LOG%"
+node ferramentas\corrigir-release.mjs >> "%LOG%" 2>&1
 set "GH_TOKEN="
 
 call "%~dp0ferramentas\separar-instalador.bat" >nul 2>&1

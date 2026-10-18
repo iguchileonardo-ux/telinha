@@ -56,7 +56,17 @@ const RATE_LIMITS = { chat: [8, 5000], react: [6, 3000], img: [40, 10000], galle
 // Um único nível: quem transmite, o repassador e os espectadores dele.
 const TREE_KIDS = 3; // espectadores atendidos por cada repassador
 const TREE_FORWARD_MAX = 4; // limite de segurança para quem repassa
-const LOAD_GRACE_MS = 12000; // tempo de uma conexão enviando antes de ser avaliada
+const LOAD_GRACE_MS = 20000; // tempo de uma conexão enviando antes de ser avaliada
+// Um repasse novo começa com a estimativa de banda baixa e leva mais tempo para subir.
+const RELAY_GRACE_MS = 30000;
+// Qualidade mínima das conexões de um repasse. Um repassador com conexão ruim recodifica a
+// tela em qualidade baixa: em 17/10/2026 alguém com 135 a 700 ms de atraso foi escolhido como
+// repassador de quem tinha 14 ms direto com quem transmitia, e a imagem ficou ruim.
+const RELAY_MAX_RTT = 80; // ms em cada trecho (quem transmite > repassador > espectador)
+const RELAY_EXTRA_RTT = 60; // ms a mais que o caminho pelo repassador pode ter em relação ao direto
+// Quem tem atraso alto mesmo sem carga (mora longe ou tem internet ruim) fica limitado pela
+// própria conexão: isso não indica que o envio de quem transmite está no limite.
+const FAR_RTT = 100;
 const LOAD_SAMPLES = 4; // amostras de 2 s avaliadas em conjunto
 const LOAD_LIMITED = 0.5; // fração do tempo limitado que caracteriza sobrecarga
 const LOAD_COOLDOWN_MS = 15000; // intervalo mínimo entre mudanças de distribuição
@@ -67,13 +77,16 @@ const UPLINK_KEY = 'telinha:uplink';
 // Indica se o envio está sobrecarregado. Cada registro traz o histórico recente do
 // tempo em que o envio de vídeo ficou limitado por banda ou por processador.
 // Com 'min' = 2, só considera sobrecarga quando há ao menos duas conexões medidas
-// (com uma só, não há o que repassar).
+// (com uma só, não há o que repassar). Registros com 'far' (conexão ruim do lado de quem
+// recebe) contam para o processador, mas não para a banda.
 export function overloaded(records, min = 2) {
   const rows = records.filter((r) => r && r.hist.length >= LOAD_SAMPLES);
   if (rows.length < min) return false;
   const mean = (r, key) => r.hist.reduce((sum, x) => sum + x[key], 0) / r.hist.length;
   if (rows.some((r) => mean(r, 'cpu') >= LOAD_LIMITED)) return true;
-  return rows.filter((r) => mean(r, 'frac') >= LOAD_LIMITED).length >= Math.max(min > 1 ? 2 : 1, Math.ceil(rows.length * 0.6));
+  const near = rows.filter((r) => !r.far);
+  if (near.length < min) return false;
+  return near.filter((r) => mean(r, 'frac') >= LOAD_LIMITED).length >= Math.max(min > 1 ? 2 : 1, Math.ceil(near.length * 0.6));
 }
 
 // Taxa de bits de cada envio de vídeo conforme o número de pessoas recebendo direto de mim:
@@ -87,6 +100,7 @@ export function fanoutScale(count) {
 }
 
 const shortId = (id) => String(id || '').slice(0, 4);
+const LIMIT_TEXT = { none: 'nenhuma', bandwidth: 'banda', cpu: 'processador', other: 'outra' };
 
 function readUplink() {
   try { return Math.max(0, Math.min(1_000_000, Number(localStorage.getItem(UPLINK_KEY)) || 0)); } catch { return 0; }
@@ -571,6 +585,11 @@ export class TurmaSession extends EventTarget {
       drawAllow: [...this.drawAllow],
       // Quem está conectado direto comigo (para a ponte).
       links: [...this.peers.values()].filter((p) => !p.via && p.uid).map((p) => p.id).slice(0, 32),
+      // Atraso (ms) até cada pessoa conectada direto, para escolher bons repassadores.
+      lat: Object.fromEntries([...this.peers.values()].filter((p) => !p.via && p.uid && p.net?.rtt != null).slice(0, 32).map((p) => {
+        p.latSent = p.net.rtt;
+        return [p.id, p.net.rtt];
+      })),
     };
   }
 
@@ -743,6 +762,7 @@ export class TurmaSession extends EventTarget {
 
   #broadcastHello() {
     if (this.closed) return;
+    this.lastHelloAt = Date.now();
     this.#send('hello', this.#hello());
   }
 
@@ -760,7 +780,9 @@ export class TurmaSession extends EventTarget {
 
   async #onJoin(peerId) {
     if (this.closed || blocked(peerId)) return;
+    const known = this.peers.has(peerId);
     const peer = this.#peer(peerId);
+    if (!known || !peer.uid) this.#log(`Conexão aberta com ${shortId(peerId)}.`);
     // Quem estava pela ponte agora conectou direto.
     const wasBridged = !!peer.via;
     if (wasBridged) peer.via = null;
@@ -890,6 +912,12 @@ export class TurmaSession extends EventTarget {
     peer.drawAllow = Array.isArray(data.drawAllow) ? data.drawAllow.filter((x) => typeof x === 'string').slice(0, 32) : [];
     peer.canRelay = data.tree === 1;
     peer.up = Math.max(0, Math.min(1_000_000, Number(data.up) || 0));
+    peer.lat = parseLat(data.lat);
+    // A outra pessoa não recebeu a minha apresentação: mando de novo só para ela.
+    if (data.ask === true && !peer.via && Date.now() - (peer.answeredAsk || 0) > 3000) {
+      peer.answeredAsk = Date.now();
+      this.#send('hello', this.#hello(), peer.id);
+    }
     const routeBefore = peer.sharing?.relays?.[this.selfId] || null;
     const s = data.sharing;
     if (s && typeof s === 'object' && typeof s.streamId === 'string') {
@@ -927,7 +955,10 @@ export class TurmaSession extends EventTarget {
     this.#syncStreams();
     this.#checkRouted(peer.id);
     this.#emit('member', { uid: peer.uid, name: peer.name, avatar: peer.avatar });
-    if (firstHello && !peer.via && peer.uid) this.#emit('peer-presence', { peer, present: true });
+    if (firstHello && !peer.via && peer.uid) {
+      this.#log(`${this.#who(peer.id)} entrou na turma${peer.inCall ? ' (na call)' : ''}.`);
+      this.#emit('peer-presence', { peer, present: true });
+    }
     if (before.sharing !== peer.sharing?.streamId && peer.sharing && before.sharing === undefined) {
       this.#emit('started-sharing', { peer });
     }
@@ -1132,10 +1163,20 @@ export class TurmaSession extends EventTarget {
 
   #tick() {
     if (this.closed) return;
+    const now = Date.now();
+    // Intervalo muito maior que 2 s: o computador estava suspenso. Os sockets e as conexões
+    // costumam cair sem aviso nesse caso; reabre a sinalização para se anunciar de novo.
+    if (this.lastTickAt && now - this.lastTickAt > 30000) {
+      this.#log(`A Telinha ficou ${Math.round((now - this.lastTickAt) / 1000)} s parada (computador suspenso); reconectando.`);
+      this.#kickSignaling(true);
+    }
+    this.lastTickAt = now;
     let online = false;
     try {
       online = Object.values(this.sockets() || {}).some((s) => s && s.readyState === WebSocket.OPEN);
     } catch { online = false; }
+    // Socket fechado de propósito (#kickSignaling) volta em poucos segundos: não é uma queda.
+    if (!online && this.signalingOnline && now - (this.lastKick || 0) < 8000) online = true;
     if (online !== this.signalingOnline) {
       this.signalingOnline = online;
       this.#emit('signaling', { online });
@@ -1148,15 +1189,46 @@ export class TurmaSession extends EventTarget {
     this.#applyReceiverHints();
     for (const peer of this.peers.values()) if (peer.sharing?.relays) this.#checkRouted(peer.id, true);
     if (this.share || this.relaying.size) this.#loadTick();
+    this.#healPeers(now);
     this.ticks = (this.ticks || 0) + 1;
     if (this.ticks % 2 === 0) this.#measure();
+  }
+
+  // Corrige estados que a rede às vezes deixa para trás.
+  #healPeers(now) {
+    const connected = this.#connections();
+    for (const peer of [...this.peers.values()]) {
+      if (peer.via) continue;
+      if (!connected[peer.id]) {
+        // A conexão acabou sem o evento de saída (por exemplo, falha ao refazer a conexão):
+        // a pessoa continuaria aparecendo online sem estar.
+        peer.goneSince ??= now;
+        if (now - peer.goneSince > 20000) {
+          this.#log(`${this.#who(peer.id)} sem conexão há 20 s; removido da lista.`);
+          this.#onLeave(peer.id);
+        }
+        continue;
+      }
+      peer.goneSince = null;
+      // Conectado, mas a apresentação (hello) não chegou: a pessoa não apareceria na lista.
+      if (!peer.uid && now - peer.joinedAt > 4000 && now - (peer.askedAt || 0) > 5000) {
+        peer.askedAt = now;
+        this.#log(`Conectado com ${shortId(peer.id)}, mas sem apresentação; pedindo de novo.`);
+        this.#send('hello', { ...this.#hello(), ask: true }, peer.id);
+      }
+    }
+    // Apresentação periódica: mantém todos com o estado atual mesmo se uma mensagem se perder.
+    if (now - (this.lastHelloAt || 0) > 60000) this.#broadcastHello();
   }
 
   // Mede a conexão com cada pessoa: atraso (ms), perda de pacotes e o caminho
   // (direto, pelo servidor TURN ou pela ponte). Resultado em peer.net.
   async #measure() {
     const connections = this.#connections();
+    const inbound = new Map(); // faixa recebida -> estatísticas de vídeo (para o registro)
     let changed = false;
+    let latFirst = false;
+    let latChanged = false;
     for (const peer of this.peers.values()) {
       if (peer.via) continue;
       const pc = connections[peer.id];
@@ -1171,6 +1243,7 @@ export class TurmaSession extends EventTarget {
         byId.set(r.id, r);
         if (r.type === 'candidate-pair' && (r.selected || (r.nominated && r.state === 'succeeded'))) pair = pair || r;
         if (r.type === 'inbound-rtp' && r.kind === 'audio') { received += r.packetsReceived || 0; lost += r.packetsLost || 0; }
+        if (r.type === 'inbound-rtp' && r.kind === 'video' && r.trackIdentifier) inbound.set(r.trackIdentifier, r);
       });
       stats.forEach((r) => {
         if (r.type === 'transport' && r.selectedCandidatePairId && byId.has(r.selectedCandidatePairId)) pair = byId.get(r.selectedCandidatePairId);
@@ -1180,7 +1253,16 @@ export class TurmaSession extends EventTarget {
       const dl = Math.max(0, lost - prev.lost);
       peer.netRaw = { received, lost };
       const loss = dr + dl > 20 ? dl / (dr + dl) : (peer.net?.loss ?? 0);
-      const rtt = pair?.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : (peer.net?.rtt ?? null);
+      const forcedRtt = globalThis.__telinhaRtt?.(peer.id); // usado só nos testes automáticos
+      const rtt = typeof forcedRtt === 'number' ? forcedRtt
+        : pair?.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : (peer.net?.rtt ?? null);
+      // Menor atraso já medido: mostra a distância real, sem a fila criada pela carga.
+      if (rtt != null && rtt >= 0) peer.minRtt = Math.min(peer.minRtt ?? Infinity, rtt);
+      // O atraso vai no hello (para os repasses): avisa logo a primeira medida e mudanças grandes.
+      if (rtt != null && peer.uid) {
+        if (peer.latSent === undefined) latFirst = true;
+        else if (Math.abs(rtt - peer.latSent) > 40) latChanged = true;
+      }
       const local = pair && byId.get(pair.localCandidateId);
       const remote = pair && byId.get(pair.remoteCandidateId);
       const path = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'turn' : 'direto';
@@ -1192,6 +1274,9 @@ export class TurmaSession extends EventTarget {
         this.#log(`Conexão com ${this.#who(peer.id)}: ${path}, atraso ${rtt ?? '?'} ms, perda ${Math.round(loss * 100)}%, nível ${level}.`);
       }
     }
+    this.#logReceived(inbound);
+    const sinceHello = Date.now() - (this.lastHelloAt || 0);
+    if ((latFirst && sinceHello > 3000) || (latChanged && sinceHello > 20000)) this.#broadcastHello();
     for (const peer of this.peers.values()) {
       if (!peer.via) continue;
       const bridge = this.peers.get(peer.via)?.net;
@@ -1205,6 +1290,31 @@ export class TurmaSession extends EventTarget {
 
   #connections() {
     try { return this.room.getPeers() || {}; } catch { return {}; }
+  }
+
+  // Registro: como chega cada tela que estou assistindo (resolução, quadros e taxa).
+  // A cada ~30 s, e na hora quando a resolução cai para menos da metade da maior já vista.
+  #logReceived(inbound) {
+    const now = Date.now();
+    for (const peer of this.peers.values()) {
+      const stream = this.shareOf(peer);
+      const track = stream?.getVideoTracks()[0];
+      const r = track && inbound.get(track.id);
+      if (!r) { peer.rx = null; continue; }
+      const prev = peer.rx?.id === r.id ? peer.rx : null;
+      const kbps = prev && now > prev.t ? Math.round(((r.bytesReceived || 0) - prev.bytes) * 8 / (now - prev.t)) : null;
+      const pixels = (r.frameWidth || 0) * (r.frameHeight || 0);
+      const best = Math.max(prev?.best || 0, pixels);
+      const drop = prev && pixels && pixels < best / 2 && !prev.dropped;
+      peer.rx = { id: r.id, t: now, bytes: r.bytesReceived || 0, best, dropped: prev?.dropped && pixels < best / 2, loggedAt: prev?.loggedAt || 0 };
+      if (kbps == null) continue;
+      if (drop || now - peer.rx.loggedAt > 30000) {
+        peer.rx.loggedAt = now;
+        if (drop) peer.rx.dropped = true;
+        const via = stream === peer.relayed?.get(peer.sharing.streamId) && peer.feedVia ? `pelo repassador ${this.#who(peer.feedVia)}` : peer.via ? 'pela ponte' : 'direto';
+        this.#log(`Tela de ${this.#who(peer.id)} recebida ${via}: ${r.frameWidth || '?'}x${r.frameHeight || '?'} a ${Math.round(r.framesPerSecond || 0)} qps, ${kbps} kbps, perda ${r.packetsLost || 0} pacotes${drop ? '; resolução caiu' : ''}.`);
+      }
+    }
   }
 
   // Ajusta a qualidade do que é enviado: quadros por segundo, taxa de bits e prioridade.
@@ -1459,7 +1569,8 @@ export class TurmaSession extends EventTarget {
       const viewer = this.peers.get(viewerId);
       const relay = this.peers.get(route.relay);
       const valid = viewer && relay && !viewer.via && !relay.via && viewer.inCall && relay.inCall && relay.canRelay
-        && relay.links?.includes(viewerId) && viewer.links?.includes(route.relay);
+        && relay.links?.includes(viewerId) && viewer.links?.includes(route.relay)
+        && (this.#rttBetween(relay, viewer) ?? 0) <= RELAY_MAX_RTT * 2;
       if (!valid) {
         this.#log(`${this.#who(viewerId)} volta a receber direto: o repasse por ${this.#who(route.relay)} deixou de ser possível.`);
         this.routes.delete(viewerId);
@@ -1487,39 +1598,80 @@ export class TurmaSession extends EventTarget {
     return !!(a.links?.includes(b.id) && b.links?.includes(a.id));
   }
 
+  // Atraso entre duas outras pessoas, pelo que elas informam no hello (null se ninguém mediu).
+  #rttBetween(a, b) {
+    const x = a.lat?.[b.id];
+    const y = b.lat?.[a.id];
+    if (x == null && y == null) return null;
+    return Math.max(x ?? 0, y ?? 0);
+  }
+
+  // Bom repassador: perto de mim (pelo menor atraso já medido, que não sobe com a minha
+  // própria fila de envio) e sem perda de pacotes.
+  #goodRelay(p) {
+    return p.minRtt != null && p.minRtt <= RELAY_MAX_RTT && (p.net?.loss ?? 0) < 0.03;
+  }
+
+  // O espectador pode receber por este repassador sem piorar o caminho.
+  #relayFits(relay, viewer, limit = RELAY_MAX_RTT) {
+    if (!this.#linked(relay, viewer)) return false;
+    const hop = this.#rttBetween(relay, viewer);
+    if (hop == null || hop > limit) return false;
+    return relay.minRtt + hop <= (viewer.minRtt ?? Infinity) + RELAY_EXTRA_RTT;
+  }
+
   #kidsOf(relayId) {
     let n = 0;
     for (const e of this.routes.values()) if (e.relay === relayId) n += 1;
     return n;
   }
 
+  // Faixas de vídeo que eu envio a uma pessoa: a minha tela e as telas que eu repasso a ela.
+  #videoTracksTo(id) {
+    const tracks = new Set();
+    const mine = this.share?.stream.getVideoTracks()[0];
+    if (mine && this.sent.get(this.share.stream.id)?.has(id)) tracks.add(mine);
+    for (const f of this.relaying.values()) if (f.target === id) f.stream.getVideoTracks().forEach((t) => tracks.add(t));
+    return tracks;
+  }
+
   // Mede o envio de vídeo de cada conexão: fração do tempo limitado por banda ou processador.
-  async #sampleLoad(ids) {
+  // relayOnly: destinos que só recebem o meu repasse (têm carência maior).
+  async #sampleLoad(ids, relayOnly = new Set()) {
     const now = Date.now();
     const connections = this.#connections();
     let kbps = 0;
     let limited = 0;
     for (const id of ids) {
       let rec = this.load.get(id);
-      if (!rec) { rec = { since: now, prev: null, hist: [] }; this.load.set(id, rec); }
+      if (!rec) { rec = { since: now, prev: null, hist: [], grace: relayOnly.has(id) ? RELAY_GRACE_MS : LOAD_GRACE_MS }; this.load.set(id, rec); }
+      rec.far = (this.peers.get(id)?.minRtt ?? 0) > FAR_RTT;
       let sample = null;
       const forced = globalThis.__telinhaLoad?.(id); // usado só nos testes automáticos
       if (forced) {
         sample = { frac: forced.frac || 0, cpu: forced.cpu || 0, kbps: forced.kbps || 0 };
       } else {
         const pc = connections[id];
-        if (!pc?.getStats) continue;
-        let stats;
-        try { stats = await pc.getStats(); } catch { continue; }
+        if (!pc?.getSenders) continue;
+        // Só os envios ativos desta faixa: quem saiu e voltou, ou uma transmissão anterior,
+        // deixam envios antigos na conexão (sem faixa), com os números parados. Antes a medição
+        // escolhia o envio com mais bytes, que era o antigo, e media 0 kbps.
+        const tracks = this.#videoTracksTo(id);
         let out = null;
-        stats.forEach((r) => {
-          if (r.type === 'outbound-rtp' && r.kind === 'video' && (!out || (r.bytesSent || 0) > (out.bytesSent || 0))) out = r;
-        });
+        for (const sender of pc.getSenders()) {
+          if (!sender.track || !tracks.has(sender.track)) continue;
+          let stats;
+          try { stats = await sender.getStats(); } catch { continue; }
+          stats.forEach((r) => {
+            if (r.type === 'outbound-rtp' && r.kind === 'video' && (!out || (r.bytesSent || 0) > (out.bytesSent || 0))) out = r;
+          });
+        }
         if (!out) continue;
         const d = out.qualityLimitationDurations;
-        const cur = { t: now, bytes: out.bytesSent || 0, none: d?.none ?? 0, cpu: d?.cpu ?? 0, bw: d?.bandwidth ?? 0, other: d?.other ?? 0 };
-        const prev = rec.prev;
+        const cur = { id: out.id, t: now, bytes: out.bytesSent || 0, none: d?.none ?? 0, cpu: d?.cpu ?? 0, bw: d?.bandwidth ?? 0, other: d?.other ?? 0 };
+        const prev = rec.prev?.id === cur.id ? rec.prev : null;
         rec.prev = cur;
+        rec.info = { w: out.frameWidth || 0, h: out.frameHeight || 0, fps: Math.round(out.framesPerSecond || 0), reason: out.qualityLimitationReason || 'none' };
         if (!prev) continue;
         const seconds = (cur.t - prev.t) / 1000;
         const rate = seconds > 0 ? ((cur.bytes - prev.bytes) * 8) / seconds / 1000 : 0;
@@ -1535,9 +1687,10 @@ export class TurmaSession extends EventTarget {
         }
       }
       kbps += sample.kbps;
+      rec.last = sample;
       if (sample.frac > 0.2) limited += 1;
       // Uma conexão recém-iniciada ainda está subindo a taxa: só é avaliada depois da carência.
-      if (now - rec.since >= LOAD_GRACE_MS) {
+      if (now - rec.since >= (rec.grace || LOAD_GRACE_MS)) {
         rec.hist.push(sample);
         if (rec.hist.length > LOAD_SAMPLES) rec.hist.shift();
       }
@@ -1563,7 +1716,7 @@ export class TurmaSession extends EventTarget {
     try {
       const kids = this.#directChildren();
       const targets = [...new Set([...this.relaying.values()].map((f) => f.target))];
-      await this.#sampleLoad([...new Set([...kids, ...targets])]);
+      await this.#sampleLoad([...new Set([...kids, ...targets])], new Set(targets.filter((id) => !kids.includes(id))));
       for (const id of [...this.load.keys()]) if (!kids.includes(id) && !targets.includes(id)) this.load.delete(id);
       if (this.share) this.#balance(kids);
       this.#watchRelaying();
@@ -1571,6 +1724,12 @@ export class TurmaSession extends EventTarget {
       if (this.summaryTicks % 15 === 0) {
         const attached = this.share ? (this.sent.get(this.share.stream.id)?.size || 0) : 0;
         this.#log(`Resumo: ${kids.length} envio(s) direto(s), ${Math.max(0, attached - kids.length)} em pausa, ${this.routes.size} por repasse, repassando para ${targets.length}; vazão ${Math.round(this.lastKbps || 0)} kbps; maior envio já medido ${this.uplink} kbps.`);
+        for (const id of [...new Set([...kids, ...targets])]) {
+          const rec = this.load.get(id);
+          if (!rec?.last || !rec.info) continue;
+          const net = this.peers.get(id)?.net;
+          this.#log(`Envio para ${this.#who(id)}: ${Math.round(rec.last.kbps)} kbps, ${rec.info.w}x${rec.info.h} a ${rec.info.fps} qps, limitação ${LIMIT_TEXT[rec.info.reason] || rec.info.reason} (${Math.round(rec.last.frac * 100)}% do tempo), atraso ${net?.rtt ?? '?'} ms.`);
+        }
       }
     } catch (error) {
       console.warn('Medição do envio falhou:', error);
@@ -1620,7 +1779,7 @@ export class TurmaSession extends EventTarget {
     const { viewers, relays, ok } = this.#relayChoices(now);
     const levelRank = (p) => (p.net?.level === 'bad' ? 2 : p.net?.level === 'warn' ? 1 : 0);
     const kidsFor = (relay) => viewers
-      .filter((v) => v.id !== relay.id && !relays.has(v.id) && this.#linked(relay, v))
+      .filter((v) => v.id !== relay.id && !relays.has(v.id) && this.#relayFits(relay, v))
       .sort((a, b) => levelRank(b) - levelRank(a) || (a.uid < b.uid ? -1 : 1));
     const assign = (relay, list) => {
       for (const v of list) this.routes.set(v.id, { relay: relay.id, since: now, confirmed: false });
@@ -1629,17 +1788,17 @@ export class TurmaSession extends EventTarget {
     };
 
     // 1) Repassadores já em uso com vaga.
-    for (const relay of viewers.filter((p) => relays.has(p.id) && ok(p))) {
+    for (const relay of viewers.filter((p) => relays.has(p.id) && ok(p) && this.#goodRelay(p))) {
       const spare = (this.relayCap.get(relay.id) ?? TREE_KIDS) - this.#kidsOf(relay.id);
       if (spare > 0 && assign(relay, kidsFor(relay).slice(0, spare))) return true;
     }
     // 2) Um repassador novo, o de melhor envio medido e melhor conexão com quem transmite.
     const fresh = viewers
-      .filter((p) => !relays.has(p.id) && ok(p) && p.net?.level !== 'bad' && p.sharing?.kind !== 'screen' && kidsFor(p).length)
-      .sort((a, b) => b.up - a.up || levelRank(a) - levelRank(b) || (a.net?.rtt ?? 9999) - (b.net?.rtt ?? 9999) || (a.uid < b.uid ? -1 : 1));
+      .filter((p) => !relays.has(p.id) && ok(p) && this.#goodRelay(p) && p.sharing?.kind !== 'screen' && kidsFor(p).length)
+      .sort((a, b) => b.up - a.up || levelRank(a) - levelRank(b) || (a.minRtt ?? 9999) - (b.minRtt ?? 9999) || (a.uid < b.uid ? -1 : 1));
     if (fresh.length) return assign(fresh[0], kidsFor(fresh[0]).slice(0, TREE_KIDS));
     // 3) Sem alternativa: um repassador saudável passa a atender mais uma pessoa.
-    for (const relay of viewers.filter((p) => relays.has(p.id) && ok(p))) {
+    for (const relay of viewers.filter((p) => relays.has(p.id) && ok(p) && this.#goodRelay(p))) {
       const cap = this.relayCap.get(relay.id) ?? TREE_KIDS;
       if (cap >= TREE_FORWARD_MAX) continue;
       const kid = kidsFor(relay)[0];
@@ -1655,7 +1814,7 @@ export class TurmaSession extends EventTarget {
     let placed = false;
     for (const v of viewers) {
       if (relays.has(v.id) || v.joinedAt <= this.offloadedAt) continue;
-      const relay = viewers.find((r) => relays.has(r.id) && ok(r) && this.#linked(r, v)
+      const relay = viewers.find((r) => relays.has(r.id) && ok(r) && this.#goodRelay(r) && this.#relayFits(r, v)
         && (this.relayCap.get(r.id) ?? TREE_KIDS) - this.#kidsOf(r.id) > 0);
       if (!relay) continue;
       this.routes.set(v.id, { relay: relay.id, since: now, confirmed: false });
@@ -1664,6 +1823,16 @@ export class TurmaSession extends EventTarget {
     }
     return placed;
   }
+}
+
+function parseLat(value) {
+  if (!value || typeof value !== 'object') return null;
+  const out = {};
+  for (const [id, ms] of Object.entries(value).slice(0, 32)) {
+    const n = Number(ms);
+    if (id.length <= 64 && Number.isFinite(n) && n >= 0) out[id] = Math.min(10000, Math.round(n));
+  }
+  return out;
 }
 
 function parseRelays(value) {

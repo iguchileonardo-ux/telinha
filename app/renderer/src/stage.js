@@ -115,7 +115,10 @@ class Tile {
     this.id = id;
     this.hooks = hooks;
     this.stream = null;
-    this.volume = volume;
+    // volume: último nível escolhido (para voltar ao tirar do mudo); silent: som desligado.
+    // Os dois sobrevivem à troca de stream (repasse, reconexão), para o som não voltar sozinho.
+    this.silent = volume === 0;
+    this.volume = volume > 0 ? volume : 1;
     this.meterTracks = 0;
     this.stopMeter = () => {};
     this.mode = null; // null | 'pointer' | 'draw'
@@ -149,12 +152,15 @@ class Tile {
     controls.className = 'tile-controls';
     const muteBtn = this.#button('volume', 'Silenciar', () => {
       if (video.muted || video.volume === 0) {
+        this.silent = false;
         video.muted = false;
-        if (video.volume === 0) video.volume = this.volume || 1;
+        video.volume = this.volume;
         video.play().catch(() => {});
       } else {
+        this.silent = true;
         video.muted = true;
       }
+      this.hooks.onVolume?.(this.id, this.silent ? 0 : this.volume);
       syncAudio();
     });
     const slider = document.createElement('input');
@@ -190,9 +196,10 @@ class Tile {
     slider.addEventListener('input', (e) => {
       e.stopPropagation();
       const v = Number(slider.value);
-      video.volume = v;
-      video.muted = v === 0;
+      this.silent = v === 0;
       if (v > 0) this.volume = v;
+      video.volume = this.volume;
+      video.muted = this.silent;
       this.hooks.onVolume?.(this.id, v);
       syncAudio();
     });
@@ -323,7 +330,7 @@ class Tile {
     this.stream = stream;
     this.meterTracks = -1;
     this.video.srcObject = stream;
-    this.video.muted = false;
+    this.video.muted = this.silent;
     this.video.volume = this.volume;
     this.video.play().catch(() => {
       this.video.muted = true;

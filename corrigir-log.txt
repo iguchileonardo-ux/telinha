@@ -1,0 +1,10 @@
+[17/10/2026  3:15:27,16] Corrigindo releases 
+v2.3.1: 2 releases com a mesma tag. Mantendo a 404938329 (latest.yml, Telinha-Instalador.exe).
+v2.3.1: release repetida 404938328 removida.
+v2.3.1: arquivos copiados para a release mantida: Telinha-Instalador.exe.blockmap.
+latest.yml de v2.3.1 acessível (versão 2.3.1)
+v2.3.0: 2 releases com a mesma tag. Mantendo a 404913235 (latest.yml, Telinha-Instalador.exe).
+v2.3.0: release repetida 404913232 removida.
+v2.3.0: arquivos copiados para a release mantida: Telinha-Instalador.exe.blockmap.
+latest.yml de v2.3.0 acessível (versão 2.3.0)
+latest.yml de v2.3.1 acessível (versão 2.3.1)

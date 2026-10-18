@@ -735,6 +735,24 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
   z-index: 4;
 }
 .self-preview video { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: contain; background: var(--video-bg); }
+/* Com telas recebidas no palco, a prévia vira uma miniatura na faixa de baixo,
+   fora da área das telas (antes ela cobria o volume da tela recebida). */
+.self-preview.compact {
+  bottom: 12px;
+  width: auto;
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: flex-end;
+  gap: 6px;
+  overflow: visible;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+.self-preview.compact video { width: 108px; flex: none; border-radius: 9px; border: 1px solid var(--line); }
+.self-preview.compact .self-info { position: absolute; top: 6px; right: 6px; padding: 0; }
+.self-preview.compact #selfLabel, .self-preview.compact .level { display: none; }
+.self-preview.compact .draw-allowed { padding: 0; flex-wrap: nowrap; }
 .self-info { display: flex; align-items: center; gap: 7px; padding: 7px 10px; font-size: 12px; color: var(--muted); }
 .self-info > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .draw-allowed { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px; }

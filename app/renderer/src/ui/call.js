@@ -142,10 +142,15 @@ export class CallView {
     share.replaceChildren(icon(session.sharing ? 'stop' : 'monitor', 17), session.sharing ? 'Parar' : 'Compartilhar');
     share.classList.toggle('stop', session.sharing);
 
-    // Prévia da própria transmissão
-    $('selfPreview').hidden = !session.sharing;
-    const selfVideo = $('selfVideo');
+    // Prévia da própria transmissão. Com telas recebidas no palco ela fica compacta,
+    // fora das telas, para não cobrir o volume e o ponteiro de quem eu estou assistindo.
+    const preview = $('selfPreview');
     const local = session.share?.kind === 'screen' ? session.localStream : null;
+    const compact = screens.length > 0 && !!local;
+    preview.hidden = !session.sharing;
+    preview.classList.toggle('compact', compact);
+    preview.title = compact ? $('selfLabel').textContent : '';
+    const selfVideo = $('selfVideo');
     selfVideo.hidden = !local;
     if (selfVideo.srcObject !== local) selfVideo.srcObject = local;
     const allowed = [...session.drawAllow];
