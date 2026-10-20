@@ -6,7 +6,7 @@ import { Annotator } from './annotate.js';
 const GAP = 12;
 
 export class Stage {
-  // hooks: { onPointer, onStroke, onDrawRequest, onVolume, myColor }
+  // hooks: { onPointer, onStroke, onDrawRequest, onRelay, onCopy, onVolume, myColor }
   constructor(root, hooks = {}) {
     this.root = root;
     this.hooks = hooks;
@@ -28,7 +28,7 @@ export class Stage {
     return this.tiles.get(id) || null;
   }
 
-  // items: [{ id, name, stream, draw: 'none' | 'pending' | 'allowed', volume }]
+  // items: [{ id, name, stream, draw: 'none' | 'pending' | 'allowed', relay: null | 'off' | 'on', volume }]
   sync(items) {
     const wanted = new Set(items.map((i) => i.id));
     for (const id of [...this.tiles.keys()]) {
@@ -39,6 +39,7 @@ export class Stage {
       tile.setName(item.name);
       tile.setStream(item.stream);
       tile.setDraw(item.draw || 'none');
+      tile.setRelay(item.relay || null);
     }
     if (this.focusId && !this.tiles.has(this.focusId)) this.focusId = null;
     this.layout();
@@ -146,7 +147,15 @@ class Tile {
       if (this.draw === 'allowed') this.#setMode(this.mode === 'draw' ? null : 'draw');
       else if (this.draw === 'none') this.hooks.onDrawRequest?.(this.id);
     });
-    tools.append(pointerBtn, penBtn);
+    const relayBtn = this.#button('broadcast', 'Retransmitir para a turma', () => {
+      if (this.relay) this.hooks.onRelay?.(this.id, this.relay !== 'on');
+    });
+    relayBtn.hidden = true;
+    const copyBtn = this.#button('copy', 'Copiar imagem', () => {
+      const frame = this.frame();
+      if (frame) this.hooks.onCopy?.(this.id, frame);
+    });
+    tools.append(pointerBtn, penBtn, relayBtn, copyBtn);
 
     const controls = document.createElement('div');
     controls.className = 'tile-controls';
@@ -250,6 +259,8 @@ class Tile {
     this.label = label;
     this.pointerBtn = pointerBtn;
     this.penBtn = penBtn;
+    this.relayBtn = relayBtn;
+    this.relay = null; // null | 'off' | 'on'
     this.syncAudio = syncAudio;
     this.annotator = new Annotator(canvas, () => this.contentRect());
     this.setName(name);
@@ -275,6 +286,16 @@ class Tile {
     this.penBtn.classList.toggle('active', mode === 'draw');
   }
 
+  // Retransmissão da tela para a turma por quem assiste: null (indisponível), 'off' ou 'on'.
+  setRelay(mode) {
+    this.relay = mode;
+    this.relayBtn.hidden = !mode;
+    this.relayBtn.classList.toggle('active', mode === 'on');
+    this.relayBtn.title = mode === 'on' ? 'Parar de retransmitir' : 'Retransmitir para a turma';
+    this.relayBtn.setAttribute('aria-label', this.relayBtn.title);
+    this.relayBtn.setAttribute('aria-pressed', String(mode === 'on'));
+  }
+
   setDraw(state) {
     this.draw = state;
     this.penBtn.classList.toggle('pending', state === 'pending');
@@ -295,6 +316,17 @@ class Tile {
     this.#flushStroke(true);
     this.annotator.stroke(`me:${this.stroke.id}`, [], this.hooks.myColor || '#9aa8ff', true);
     this.stroke = null;
+  }
+
+  // Quadro atual da tela recebida, em PNG (data URL), na resolução em que chega.
+  frame() {
+    const { videoWidth: w, videoHeight: hgt } = this.video;
+    if (!w || !hgt) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = hgt;
+    canvas.getContext('2d').drawImage(this.video, 0, 0, w, hgt);
+    return canvas.toDataURL('image/png');
   }
 
   // Área do vídeo dentro do quadro (object-fit: contain)

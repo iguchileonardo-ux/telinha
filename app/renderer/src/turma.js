@@ -22,10 +22,60 @@ import * as store from './store.js';
 const APP_ID = 'telinha-app-v1-7d3f91c2';
 const PROTOCOL = 2;
 
-export const QUALITY = {
-  detail: { frameRate: 30, maxBitrate: 6_000_000, hint: 'detail', audioBitrate: 128_000, buffer: null },
-  motion: { frameRate: 60, maxBitrate: 9_000_000, hint: 'motion', audioBitrate: 128_000, buffer: null },
-  movie: { frameRate: 24, maxBitrate: 4_500_000, hint: 'motion', audioBitrate: 192_000, buffer: 0.8 },
+// ---- qualidade da transmissão: quadros por segundo e resolução ----
+// Até a 2.3.3 havia três modos (nitidez, fluidez, filme). Eles continuam no hello (campo
+// 'mode') para as versões antigas, e um hello sem 'fps' é convertido por QUALITY_FROM_MODE.
+export const FPS_CHOICES = [24, 30, 60];
+export const RES_CHOICES = [480, 720, 1080, 0]; // altura em linhas; 0 = resolução original da tela
+export const DEFAULT_QUALITY = { fps: 30, res: 1080 };
+const QUALITY_FROM_MODE = { detail: { fps: 30, res: 0 }, motion: { fps: 60, res: 0 }, movie: { fps: 24, res: 0 } };
+
+export function normalizeQuality(q) {
+  return {
+    fps: FPS_CHOICES.includes(Number(q?.fps)) ? Number(q.fps) : DEFAULT_QUALITY.fps,
+    res: RES_CHOICES.includes(Number(q?.res)) ? Number(q.res) : DEFAULT_QUALITY.res,
+  };
+}
+
+// Taxa máxima de vídeo (por pessoa) para a altura que de fato é enviada, a 30 qps.
+function baseBitrate(height) {
+  if (height <= 480) return 1_500_000;
+  if (height <= 720) return 3_000_000;
+  if (height <= 1080) return 6_000_000;
+  if (height <= 1440) return 9_000_000;
+  return 12_000_000;
+}
+
+// Parâmetros de envio para uma escolha de quadros e resolução.
+// sourceHeight: altura da imagem capturada (para 'Original' e para não aumentar a imagem).
+// 24 qps é pensado para filmes: som em qualidade maior e uma folga no recebimento contra travadas.
+// 60 qps é pensado para jogos: quando a internet não aguenta, mantém a fluidez e reduz a nitidez.
+export function qualityProfile(q, sourceHeight = 0) {
+  const { fps, res } = normalizeQuality(q);
+  const src = sourceHeight > 0 ? sourceHeight : res || 1080;
+  const height = res && res < src ? res : src;
+  const factor = fps >= 60 ? 1.5 : fps <= 24 ? 0.85 : 1;
+  return {
+    fps,
+    res,
+    height,
+    downBy: src > height * 1.02 ? src / height : 1,
+    maxBitrate: Math.round(baseBitrate(height) * factor),
+    hint: fps >= 60 ? 'motion' : 'detail',
+    preference: fps >= 60 ? 'maintain-framerate' : 'maintain-resolution',
+    audioBitrate: fps <= 24 ? 192_000 : 128_000,
+    buffer: fps <= 24 ? 0.8 : null,
+    mode: fps >= 60 ? 'motion' : fps <= 24 ? 'movie' : 'detail',
+  };
+}
+
+export function qualityText(q) {
+  const { fps, res } = normalizeQuality(q);
+  return `${res ? `${res}p` : 'original'} a ${fps} qps`;
+}
+
+const videoHeight = (track) => {
+  try { return Number(track?.getSettings?.().height) || 0; } catch { return 0; }
 };
 
 // ---- áudio estéreo e de alta qualidade (Opus) em todas as conexões ----
@@ -56,6 +106,10 @@ const RATE_LIMITS = { chat: [8, 5000], react: [6, 3000], img: [40, 10000], galle
 // Um único nível: quem transmite, o repassador e os espectadores dele.
 const TREE_KIDS = 3; // espectadores atendidos por cada repassador
 const TREE_FORWARD_MAX = 4; // limite de segurança para quem repassa
+// Retransmissão pedida por um espectador (ver requestRelay): ele atende toda a turma, sem as regras
+// de atraso do repasse automático, porque foi escolhido por uma pessoa.
+const TREE_FORWARD_MANUAL = 12;
+const MANUAL_RETRY_MS = 30000; // espera antes de tentar de novo com quem não recebeu pelo retransmissor
 const LOAD_GRACE_MS = 20000; // tempo de uma conexão enviando antes de ser avaliada
 // Um repasse novo começa com a estimativa de banda baixa e leva mais tempo para subir.
 const RELAY_GRACE_MS = 30000;
@@ -146,9 +200,9 @@ export class TurmaSession extends EventTarget {
     this.muted = false;
     this.micStream = null;
     this.micId = settings.micId || '';
-    this.share = null; // { stream, kind: 'screen' | 'audio', mode, label, audio }
+    this.share = null; // { stream, kind: 'screen' | 'audio', q: { fps, res }, label, audio }
     this.drawAllow = new Set();
-    this.quality = settings.quality in QUALITY ? settings.quality : 'detail';
+    this.quality = normalizeQuality(settings);
     this.avatarHash = '';
     this.signalingOnline = false;
     this.closed = false;
@@ -168,6 +222,8 @@ export class TurmaSession extends EventTarget {
     this.relaying = new Map(); // quem repassa: `${streamId}>${espectador}` -> repasse ativo
     this.relayCap = new Map(); // repassador -> limite de espectadores
     this.badRelays = new Map(); // repassador -> até quando evitar
+    this.manualRelay = null; // quem transmite: espectador que pediu para retransmitir a tela para a turma
+    this.manualSkip = new Map(); // espectador -> até quando não tentar de novo o retransmissor manual
     this.load = new Map(); // conexão -> medição do envio de vídeo
     this.shareSince = 0;
     this.lastShift = 0;
@@ -250,11 +306,14 @@ export class TurmaSession extends EventTarget {
     this.#broadcastHello();
   }
 
+  // quality: { fps, res }. Vale na hora, inclusive durante a transmissão.
   setQuality(quality) {
-    if (!(quality in QUALITY)) return;
-    this.quality = quality;
+    const next = normalizeQuality(quality);
+    if (next.fps === this.quality.fps && next.res === this.quality.res) return;
+    this.quality = next;
     if (this.share) {
-      this.share.mode = quality;
+      this.share.q = next;
+      this.#log(`Qualidade da transmissão alterada: ${qualityText(next)}.`);
       this.#applyQuality();
       this.#broadcastHello();
     }
@@ -370,10 +429,10 @@ export class TurmaSession extends EventTarget {
     if (this.closed) { stream.getTracks().forEach((t) => t.stop()); return; }
     if (!this.inCall) await this.joinCall({ withMic: false });
     if (this.share) this.stopShare();
-    this.share = { stream, kind, mode: this.quality, label: String(label).slice(0, 60), audio };
+    this.share = { stream, kind, q: { ...this.quality }, label: String(label).slice(0, 60), audio };
     this.shareSince = Date.now();
     this.#resetRoutes();
-    this.#log(`Transmissão iniciada: ${kind === 'audio' ? 'só som' : 'tela'}, modo ${this.quality}; na call: ${[...this.peers.values()].filter((p) => p.inCall && !p.via).length}.`);
+    this.#log(`Transmissão iniciada: ${kind === 'audio' ? 'só som' : `tela ${videoHeight(stream.getVideoTracks()[0]) || '?'} linhas, enviando ${qualityText(this.quality)}`}; na call: ${[...this.peers.values()].filter((p) => p.inCall && !p.via).length}.`);
     const ending = stream.getVideoTracks()[0] || stream.getAudioTracks()[0];
     ending?.addEventListener('ended', () => {
       if (this.share?.stream === stream) this.stopShare();
@@ -395,6 +454,24 @@ export class TurmaSession extends EventTarget {
     current.stream.getTracks().forEach((t) => t.stop());
     this.#broadcastHello();
     this.#emit('share', { sharing: false });
+  }
+
+  // ---- retransmissão pedida por quem assiste ----
+
+  // Quem assiste pede a quem transmite que me use como retransmissor para o resto da turma.
+  // Retorna false se a pessoa não pode atender ao pedido (versão antiga ou sem conexão direta).
+  requestRelay(peerId, on = true) {
+    const owner = this.peers.get(peerId);
+    if (this.closed || !this.relayMode(owner)) return false;
+    this.#log(`${on ? 'Pedi' : 'Cancelei o pedido'} para retransmitir a tela de ${this.#who(peerId)} para a turma.`);
+    this.#send('feed', { sid: owner.sharing.streamId, role: 'ask', on: !!on }, peerId);
+    return true;
+  }
+
+  // 'on': eu retransmito esta tela; 'off': posso pedir; null: não disponível.
+  relayMode(peer) {
+    if (!peer?.sharing || peer.sharing.kind !== 'screen' || !peer.inCall || peer.via || !peer.canRelay || !peer.canAsk) return null;
+    return peer.sharing.manualBy === this.selfId ? 'on' : 'off';
   }
 
   // ---- streams recebidas ----
@@ -573,14 +650,19 @@ export class TurmaSession extends EventTarget {
         ? {
           streamId: this.share.stream.id,
           kind: this.share.kind,
-          mode: this.share.mode,
+          mode: qualityProfile(this.share.q).mode, // versões até a 2.3.3
+          fps: this.share.q.fps,
+          res: this.share.q.res,
           label: this.share.label,
           audio: !!this.share.stream.getAudioTracks().length,
           // Espectadores atendidos por um repassador: { espectador: repassador }.
           ...(this.routes.size ? { relays: Object.fromEntries([...this.routes].map(([viewer, e]) => [viewer, e.relay])) } : {}),
+          // Espectador que retransmite a tela para a turma a pedido dele.
+          ...(this.manualRelay ? { manualBy: this.manualRelay } : {}),
         }
         : null,
       tree: 1, // sabe repassar e receber telas por um repassador
+      man: 1, // aceita o pedido de retransmissão manual (feed com role 'ask')
       up: this.uplink || undefined,
       drawAllow: [...this.drawAllow],
       // Quem está conectado direto comigo (para a ponte).
@@ -911,6 +993,7 @@ export class TurmaSession extends EventTarget {
     peer.micStreamId = typeof data.micStreamId === 'string' ? data.micStreamId : null;
     peer.drawAllow = Array.isArray(data.drawAllow) ? data.drawAllow.filter((x) => typeof x === 'string').slice(0, 32) : [];
     peer.canRelay = data.tree === 1;
+    peer.canAsk = data.man === 1;
     peer.up = Math.max(0, Math.min(1_000_000, Number(data.up) || 0));
     peer.lat = parseLat(data.lat);
     // A outra pessoa não recebeu a minha apresentação: mando de novo só para ela.
@@ -924,14 +1007,15 @@ export class TurmaSession extends EventTarget {
       peer.sharing = {
         streamId: s.streamId,
         kind: s.kind === 'audio' ? 'audio' : 'screen',
-        mode: s.mode in QUALITY ? s.mode : 'detail',
+        q: Number.isFinite(s.fps) ? normalizeQuality(s) : (QUALITY_FROM_MODE[s.mode] || QUALITY_FROM_MODE.detail),
         label: typeof s.label === 'string' ? s.label.slice(0, 60) : '',
         audio: s.audio === true,
         relays: parseRelays(s.relays),
+        manualBy: typeof s.manualBy === 'string' ? s.manualBy.slice(0, 64) : null,
       };
     } else if (data.p === undefined && data.sharing === true && typeof data.streamId === 'string') {
       // Compatibilidade com a versão 1
-      peer.sharing = { streamId: data.streamId, kind: 'screen', mode: 'detail', label: '', audio: true };
+      peer.sharing = { streamId: data.streamId, kind: 'screen', q: QUALITY_FROM_MODE.detail, label: '', audio: true };
       peer.inCall = true;
     } else {
       peer.sharing = null;
@@ -1321,19 +1405,20 @@ export class TurmaSession extends EventTarget {
   #applyQuality() {
     const share = this.share;
     if (!share) return;
-    const q = QUALITY[this.quality];
     const video = share.stream.getVideoTracks()[0];
     const audio = share.stream.getAudioTracks()[0];
-    if (video && video.contentHint !== q.hint) {
-      video.contentHint = q.hint;
-      video.applyConstraints({ frameRate: { ideal: q.frameRate, max: q.frameRate } }).catch(() => {});
+    const q = qualityProfile(share.q, videoHeight(video));
+    if (video && video.contentHint !== q.hint) video.contentHint = q.hint;
+    if (video && share.appliedFps !== q.fps) {
+      share.appliedFps = q.fps;
+      video.applyConstraints({ frameRate: { ideal: q.fps, max: q.fps } }).catch(() => {});
     }
     if (audio && audio.contentHint !== 'music') audio.contentHint = 'music';
     const sends = this.#directChildren().length;
     const scale = fanoutScale(sends);
     if (scale !== this.lastScale) {
       this.lastScale = scale;
-      this.#log(`Qualidade por envio ajustada: ${sends} envio(s) direto(s), taxa máxima de vídeo ${Math.round(Math.min(q.maxBitrate, Math.max(FANOUT_MIN_BITRATE, q.maxBitrate * scale)) / 1000)} kbps.`);
+      this.#log(`Qualidade por envio ajustada: ${sends} envio(s) direto(s), taxa máxima de vídeo ${Math.round(Math.min(q.maxBitrate, Math.max(FANOUT_MIN_BITRATE, q.maxBitrate * scale)) / 1000)} kbps (${q.height}p a ${q.fps} qps).`);
     }
     for (const [peerId, pc] of Object.entries(this.#connections())) {
       // Fica com o envio em pausa quem saiu da call e quem já recebe a tela por um repassador
@@ -1341,25 +1426,28 @@ export class TurmaSession extends EventTarget {
       const active = !!this.peers.get(peerId)?.inCall && this.routes.get(peerId)?.confirmed !== true;
       for (const sender of pc.getSenders?.() || []) {
         if (!sender.track || (sender.track !== video && sender.track !== audio)) continue;
-        this.#tuneSender(sender, sender.track === video, this.quality, active, scale);
+        this.#tuneSender(sender, sender.track === video, q, active, scale);
       }
     }
   }
 
   // Aplica taxa de bits, quadros por segundo, prioridade e pausa a um envio.
-  #tuneSender(sender, isVideo, mode, active = true, scale = 1) {
-    const q = QUALITY[mode] || QUALITY.detail;
+  // q: resultado de qualityProfile (inclui downBy, a redução de resolução deste envio).
+  #tuneSender(sender, isVideo, q, active = true, scale = 1) {
     const params = sender.getParameters();
     const encoding = params.encodings?.[0];
     if (!encoding) return;
-    const bitrate = isVideo ? Math.min(q.maxBitrate, Math.max(FANOUT_MIN_BITRATE, Math.round(q.maxBitrate * scale))) : q.audioBitrate;
-    const fps = isVideo ? q.frameRate : undefined;
-    const preference = mode === 'detail' ? 'maintain-resolution' : 'maintain-framerate';
-    if ((encoding.active !== false) === active && encoding.maxBitrate === bitrate && encoding.maxFramerate === fps && (!isVideo || params.degradationPreference === preference)) return;
+    const bitrate = isVideo ? Math.min(q.maxBitrate, Math.max(Math.min(FANOUT_MIN_BITRATE, q.maxBitrate), Math.round(q.maxBitrate * scale))) : q.audioBitrate;
+    const fps = isVideo ? q.fps : undefined;
+    const downBy = isVideo ? Math.round(q.downBy * 1000) / 1000 : undefined;
+    const preference = q.preference;
+    if ((encoding.active !== false) === active && encoding.maxBitrate === bitrate && encoding.maxFramerate === fps
+      && (!isVideo || ((encoding.scaleResolutionDownBy || 1) === downBy && params.degradationPreference === preference))) return;
     encoding.active = active;
     encoding.maxBitrate = bitrate;
     if (isVideo) {
       encoding.maxFramerate = fps;
+      encoding.scaleResolutionDownBy = downBy;
       params.degradationPreference = preference;
     }
     sender.setParameters(params).catch(() => {
@@ -1374,7 +1462,7 @@ export class TurmaSession extends EventTarget {
     for (const peer of this.peers.values()) {
       const stream = this.shareOf(peer);
       if (!stream) continue;
-      const target = QUALITY[peer.sharing.mode]?.buffer ?? null;
+      const target = qualityProfile(peer.sharing.q).buffer;
       const tracks = new Set(stream.getTracks());
       // A tela chega pela conexão com quem transmite ou, no repasse de carga, pela do repassador.
       for (const pc of [connections[peer.id], peer.feedVia ? connections[peer.feedVia] : null]) {
@@ -1405,6 +1493,8 @@ export class TurmaSession extends EventTarget {
     this.routes.clear();
     this.relayCap.clear();
     this.badRelays.clear();
+    this.manualRelay = null;
+    this.manualSkip.clear();
     this.load.clear();
     this.lastShift = 0;
     this.offloadedAt = 0;
@@ -1425,11 +1515,11 @@ export class TurmaSession extends EventTarget {
       if (owner.sharing.kind === 'screen' && !source.getVideoTracks().length) continue;
       if (owner.sharing.audio && !source.getAudioTracks().length) continue;
       for (const [viewerId, relayId] of Object.entries(relays)) {
-        if (relayId !== this.selfId || wanted.size >= TREE_FORWARD_MAX) continue;
+        if (relayId !== this.selfId || wanted.size >= (owner.sharing.manualBy === this.selfId ? TREE_FORWARD_MANUAL : TREE_FORWARD_MAX)) continue;
         const viewer = this.peers.get(viewerId);
         if (!viewer || viewer.via || !viewer.inCall || blocked(viewerId)) continue;
         wanted.set(`${sid}>${viewerId}`, {
-          source, sid, target: viewerId, owner: owner.id, kind: owner.sharing.kind, mode: owner.sharing.mode, tracks: source.getTracks().length,
+          source, sid, target: viewerId, owner: owner.id, kind: owner.sharing.kind, q: owner.sharing.q, tracks: source.getTracks().length,
         });
       }
     }
@@ -1464,14 +1554,17 @@ export class TurmaSession extends EventTarget {
     for (const f of this.relaying.values()) {
       const pc = connections[f.target];
       if (!pc) continue;
-      const hint = (QUALITY[f.mode] || QUALITY.detail).hint;
+      const owner = this.peers.get(f.owner);
+      if (owner?.sharing?.q) f.q = owner.sharing.q; // quem transmite pode mudar a qualidade durante a transmissão
+      const q = qualityProfile(f.q, videoHeight(f.stream.getVideoTracks()[0]));
+      const hint = q.hint;
       const tracks = new Set(f.stream.getTracks());
       for (const track of tracks) {
         if (track.kind !== 'video' || track.contentHint === hint) continue;
         try { track.contentHint = hint; } catch { /* não suportado */ }
       }
       for (const sender of pc.getSenders?.() || []) {
-        if (sender.track && tracks.has(sender.track)) this.#tuneSender(sender, sender.track.kind === 'video', f.mode, true, fanoutScale(kids.get(f.owner) || 1));
+        if (sender.track && tracks.has(sender.track)) this.#tuneSender(sender, sender.track.kind === 'video', q, true, fanoutScale(kids.get(f.owner) || 1));
       }
     }
   }
@@ -1525,6 +1618,7 @@ export class TurmaSession extends EventTarget {
     const share = this.share;
     if (!share || data.sid !== share.stream.id) return;
     const now = Date.now();
+    if (data.role === 'ask') return this.#onRelayAsk(peer, data.on === true, now);
     if (data.role === 'leaf') {
       const route = this.routes.get(peer.id);
       if (!route) return;
@@ -1540,6 +1634,11 @@ export class TurmaSession extends EventTarget {
       return;
     }
     if (data.role === 'relay' && data.ok === false) {
+      if (this.manualRelay === peer.id) {
+        // Retransmissão escolhida por uma pessoa: continua, e a taxa já cai com o número de destinos.
+        if (now - (this.lastManualWarn || 0) > 60000) { this.lastManualWarn = now; this.#log(`${this.#who(peer.id)} avisou que a retransmissão está no limite; mantida por escolha dele.`); }
+        return;
+      }
       const kids = [...this.routes].filter(([, e]) => e.relay === peer.id).sort((a, b) => b[1].since - a[1].since);
       if (!kids.length) return;
       // O repassador não aguenta: atende menos gente. Se nem um espectador, deixa de ser usado.
@@ -1552,9 +1651,60 @@ export class TurmaSession extends EventTarget {
     }
   }
 
+  // Um espectador pede para retransmitir a minha tela para a turma (ou deixar de retransmitir).
+  #onRelayAsk(peer, on, now) {
+    if (!peer.uid || peer.via || !peer.inCall || !peer.canRelay) return;
+    if (!on) {
+      if (this.manualRelay !== peer.id) return;
+      this.#log(`${this.#who(peer.id)} deixou de retransmitir a minha tela; todos voltam a receber direto.`);
+      for (const [viewerId, route] of [...this.routes]) if (route.manual) this.routes.delete(viewerId);
+      this.manualRelay = null;
+      this.manualSkip.clear();
+      this.#applyQuality();
+      this.#broadcastHello();
+      return;
+    }
+    if (this.manualRelay === peer.id) return;
+    this.#log(`${this.#who(peer.id)} pediu para retransmitir a minha tela para a turma.`);
+    this.manualRelay = peer.id;
+    this.manualSkip.clear();
+    // Ele mesmo recebe direto de mim.
+    this.routes.delete(peer.id);
+    this.#assignManual(now);
+    this.#applyQuality();
+    this.#broadcastHello();
+  }
+
+  // Coloca na retransmissão manual todo mundo que ela consegue atender. Retorna true se mudou algo.
+  #assignManual(now) {
+    const relay = this.peers.get(this.manualRelay);
+    if (!relay || !this.share) return false;
+    let changed = false;
+    const added = [];
+    for (const v of this.peers.values()) {
+      if (v.id === relay.id || v.via || !v.inCall || !v.uid || !v.canRelay) continue;
+      if (!this.#linked(relay, v) || this.manualSkip.get(v.id) > now) continue;
+      const route = this.routes.get(v.id);
+      if (route?.manual && route.relay === relay.id) continue;
+      if (route?.relay === relay.id) { route.manual = true; continue; } // já recebia por ele no repasse automático
+      this.routes.set(v.id, { relay: relay.id, since: now, confirmed: false, manual: true });
+      added.push(v);
+      changed = true;
+    }
+    // Quem recebia por alguém que agora também recebe pelo retransmissor volta a seguir direto.
+    for (const [viewerId, route] of [...this.routes]) {
+      if (route.manual || !this.routes.has(route.relay)) continue;
+      this.routes.delete(viewerId);
+      changed = true;
+    }
+    if (added.length) this.#log(`Retransmissão: ${added.map((v) => this.#who(v.id)).join(', ')} ${added.length > 1 ? 'passam' : 'passa'} a receber por ${this.#who(relay.id)}.`);
+    return changed;
+  }
+
   #dropRoute(viewerId, markRelayBad, reason = '') {
     const route = this.routes.get(viewerId);
     if (!route) return;
+    if (route.manual) { markRelayBad = false; this.manualSkip.set(viewerId, Date.now() + MANUAL_RETRY_MS); }
     this.#log(`${this.#who(viewerId)} volta a receber direto de mim${reason ? `: ${reason}` : ''}${markRelayBad ? `; ${this.#who(route.relay)} ficará ${BAD_RELAY_MS / 60000} min sem uso` : ''}.`);
     this.routes.delete(viewerId);
     if (markRelayBad) this.badRelays.set(route.relay, Date.now() + BAD_RELAY_MS);
@@ -1565,9 +1715,32 @@ export class TurmaSession extends EventTarget {
   // Remove atribuições inválidas. Retorna true se algo mudou (sem enviar nada).
   #pruneRoutes(now) {
     let changed = false;
+    if (this.manualRelay) {
+      const chosen = this.peers.get(this.manualRelay);
+      if (!chosen || !chosen.inCall || chosen.via) {
+        this.#log(`${this.#who(this.manualRelay)} não pode mais retransmitir; a tela volta a seguir direto.`);
+        for (const [viewerId, route] of [...this.routes]) if (route.manual) this.routes.delete(viewerId);
+        this.manualRelay = null;
+        changed = true;
+      }
+    }
     for (const [viewerId, route] of [...this.routes]) {
       const viewer = this.peers.get(viewerId);
       const relay = this.peers.get(route.relay);
+      if (route.manual) {
+        const okManual = viewer && relay && !viewer.via && !relay.via && viewer.inCall && relay.inCall && relay.canRelay && this.#linked(relay, viewer);
+        if (!okManual) {
+          this.#log(`${this.#who(viewerId)} volta a receber direto: a retransmissão por ${this.#who(route.relay)} deixou de ser possível.`);
+          this.routes.delete(viewerId);
+          changed = true;
+        } else if (!route.confirmed && now - route.since > TREE_CONFIRM_MS) {
+          this.#log(`${this.#who(route.relay)} não entregou a tela a ${this.#who(viewerId)} em ${TREE_CONFIRM_MS / 1000} s; segue direto por ${MANUAL_RETRY_MS / 1000} s.`);
+          this.routes.delete(viewerId);
+          this.manualSkip.set(viewerId, now + MANUAL_RETRY_MS);
+          changed = true;
+        }
+        continue;
+      }
       const valid = viewer && relay && !viewer.via && !relay.via && viewer.inCall && relay.inCall && relay.canRelay
         && relay.links?.includes(viewerId) && viewer.links?.includes(route.relay)
         && (this.#rttBetween(relay, viewer) ?? 0) <= RELAY_MAX_RTT * 2;
@@ -1718,7 +1891,11 @@ export class TurmaSession extends EventTarget {
       const targets = [...new Set([...this.relaying.values()].map((f) => f.target))];
       await this.#sampleLoad([...new Set([...kids, ...targets])], new Set(targets.filter((id) => !kids.includes(id))));
       for (const id of [...this.load.keys()]) if (!kids.includes(id) && !targets.includes(id)) this.load.delete(id);
-      if (this.share) this.#balance(kids);
+      if (this.share) {
+        this.#balance(kids);
+        this.#applyQuality(); // acompanha mudanças de tamanho da janela transmitida
+        this.#emitShareStats(kids);
+      }
       this.#watchRelaying();
       this.summaryTicks = (this.summaryTicks || 0) + 1;
       if (this.summaryTicks % 15 === 0) {
@@ -1738,12 +1915,24 @@ export class TurmaSession extends EventTarget {
     }
   }
 
+  // O que de fato está saindo para quem recebe direto de mim (para a prévia da transmissão).
+  #emitShareStats(kids) {
+    const rows = kids.map((id) => this.load.get(id)).filter((r) => r?.info && r.last);
+    if (!rows.length) { this.#emit('share-stats', null); return; }
+    const best = rows.reduce((a, b) => (b.info.h * b.info.fps > a.info.h * a.info.fps ? b : a));
+    // Só conta o tempo depois da carência: no começo a estimativa de banda ainda está subindo.
+    const limited = rows.filter((r) => r.hist.length >= 2 && r.hist.reduce((sum, x) => sum + x.frac, 0) / r.hist.length >= LOAD_LIMITED);
+    const limit = limited.some((r) => r.info.reason === 'cpu') ? 'cpu' : limited.length * 2 > rows.length ? 'bandwidth' : null;
+    this.#emit('share-stats', { width: best.info.w, height: best.info.h, fps: best.info.fps, kbps: Math.round(this.lastKbps || 0), limit, viewers: rows.length });
+  }
+
   // Decide se é preciso passar espectadores para um repassador e quais.
   #balance(kids) {
     if (!this.share || this.closed) return;
     const now = Date.now();
     let announce = false;
     if (this.#pruneRoutes(now)) { this.#applyQuality(); announce = true; }
+    if (this.manualRelay && this.#assignManual(now)) announce = true;
     if (this.offloadedAt && this.#placeNewcomers()) announce = true;
     if (now - this.lastShift >= LOAD_COOLDOWN_MS && overloaded(kids.map((id) => this.load.get(id)))) {
       const summary = this.#loadSummary(kids);

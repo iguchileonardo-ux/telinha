@@ -48,6 +48,20 @@ export async function copyText(text) {
   }
 }
 
+// Copia uma imagem PNG (data URL) para a área de transferência.
+export async function copyImage(dataUrl) {
+  try {
+    if (bridge?.writeClipboardImage) return (await bridge.writeClipboardImage(dataUrl)) === true;
+    // Sem fetch: a política de segurança da página não permite ler endereços data:.
+    const bytes = Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: 'image/png' });
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function readClipboard() {
   try {
     return bridge ? await bridge.readClipboard() : '';

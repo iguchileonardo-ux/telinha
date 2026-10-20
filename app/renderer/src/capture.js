@@ -4,7 +4,6 @@ import { icon } from './icons.js';
 import { createPcmTrack } from './audio.js';
 
 const bridge = window.telinha ?? null;
-const FRAME_RATE = { detail: 30, motion: 60, movie: 24 };
 
 let audioSupport = null;
 let pcm = null;
@@ -30,8 +29,9 @@ export function stopCapture() {
 
 // Retorna { stream, kind: 'screen' | 'audio', label, audio, sourceId, warning } ou null se cancelar.
 // audio: 'window' | 'system' | 'system-echo' | 'browser' | null
-export async function captureScreen({ quality = 'detail', audio = true, lastSource = null } = {}) {
-  const frameRate = FRAME_RATE[quality] || 30;
+// fps: quadros por segundo pedidos à captura (a resolução é reduzida no envio, em turma.js).
+export async function captureScreen({ fps = 30, audio = true, lastSource = null } = {}) {
+  const frameRate = [24, 30, 60].includes(fps) ? fps : 30;
   const video = { frameRate: { ideal: frameRate, max: frameRate } };
 
   if (!bridge) {

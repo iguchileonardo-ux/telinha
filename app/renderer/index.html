@@ -105,6 +105,7 @@
         <nav class="dock" id="dock" aria-label="Controles da call" hidden>
           <button class="icon-btn" id="micBtn" type="button"></button>
           <button class="btn primary" id="shareBtn" type="button"></button>
+          <button class="icon-btn" id="qualityBtn" type="button" title="Qualidade da transmissão" aria-label="Qualidade da transmissão" hidden><i data-icon="gauge"></i></button>
           <button class="icon-btn" id="reactBtn" type="button" title="Reações" aria-label="Reações"><i data-icon="smile"></i></button>
           <button class="icon-btn" id="radioBtn" type="button" title="Rádio" aria-label="Rádio"><i data-icon="music"></i></button>
           <span class="dock-sep"></span>
@@ -128,6 +129,23 @@
   <div class="popover" id="turmaMenu" hidden></div>
   <div class="popover reactions-pop" id="reactPop" hidden></div>
   <div class="popover radio-pop" id="radioPop" hidden></div>
+  <div class="popover quality-pop" id="qualityPop" hidden>
+    <div class="pop-title">Qualidade da transmissão</div>
+    <div class="pop-sub">Quadros por segundo</div>
+    <div class="segmented full" id="popFps">
+      <button type="button" data-value="24">24</button>
+      <button type="button" data-value="30">30</button>
+      <button type="button" data-value="60">60</button>
+    </div>
+    <div class="pop-sub">Resolução</div>
+    <div class="segmented full" id="popRes">
+      <button type="button" data-value="480">480p</button>
+      <button type="button" data-value="720">720p</button>
+      <button type="button" data-value="1080">1080p</button>
+      <button type="button" data-value="0">Original</button>
+    </div>
+    <div class="pop-hint" id="popQualityHint"></div>
+  </div>
 
   <!-- Seletor de tela -->
   <dialog class="modal wide" id="picker" aria-labelledby="pickerTitle">
@@ -182,10 +200,20 @@
 
     <div class="field">
       <span>Qualidade da transmissão</span>
-      <div class="segmented full" id="setQuality">
-        <button type="button" data-value="detail">Nitidez</button>
-        <button type="button" data-value="motion">Fluidez</button>
-        <button type="button" data-value="movie">Filme</button>
+      <div class="quality-grid">
+        <small>Quadros por segundo</small>
+        <div class="segmented full" id="setFps">
+          <button type="button" data-value="24">24</button>
+          <button type="button" data-value="30">30</button>
+          <button type="button" data-value="60">60</button>
+        </div>
+        <small>Resolução</small>
+        <div class="segmented full" id="setRes">
+          <button type="button" data-value="480">480p</button>
+          <button type="button" data-value="720">720p</button>
+          <button type="button" data-value="1080">1080p</button>
+          <button type="button" data-value="0">Original</button>
+        </div>
       </div>
       <small id="qualityHint"></small>
     </div>

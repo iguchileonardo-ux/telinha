@@ -11,6 +11,7 @@ const {
   ipcMain,
   nativeImage,
   net,
+  screen,
   session,
   shell,
 } = require('electron');
@@ -82,7 +83,33 @@ function readPrefs() {
   try {
     const data = JSON.parse(fs.readFileSync(prefsFile(), 'utf8'));
     for (const key of Object.keys(DEFAULT_PREFS)) if (typeof data[key] === 'boolean') prefs[key] = data[key];
+    const b = data.bounds;
+    if (b && ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(b[k]))) prefs.bounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+    if (typeof data.maximized === 'boolean') prefs.maximized = data.maximized;
   } catch { /* primeira execução */ }
+}
+
+// Tamanho e posição salvos, só se ainda couberem em algum monitor (um monitor pode ter sido desligado).
+function savedBounds() {
+  const b = prefs.bounds;
+  if (!b || b.width < 760 || b.height < 520) return null;
+  const visible = screen.getAllDisplays().some(({ workArea: a }) => {
+    const w = Math.min(b.x + b.width, a.x + a.width) - Math.max(b.x, a.x);
+    const h = Math.min(b.y + b.height, a.y + a.height) - Math.max(b.y, a.y);
+    return w >= 200 && h >= 100;
+  });
+  return visible ? b : null;
+}
+
+let boundsTimer = null;
+function rememberBounds() {
+  clearTimeout(boundsTimer);
+  boundsTimer = setTimeout(() => {
+    if (!win || win.isDestroyed() || win.isMinimized()) return;
+    prefs.maximized = win.isMaximized();
+    if (!prefs.maximized) prefs.bounds = win.getNormalBounds();
+    savePrefs();
+  }, 600);
 }
 
 function savePrefs() {
@@ -211,9 +238,11 @@ async function writeLog(lines) {
 }
 
 function createWindow() {
+  const bounds = savedBounds();
   win = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    width: bounds?.width ?? 1180,
+    height: bounds?.height ?? 760,
+    ...(bounds ? { x: bounds.x, y: bounds.y } : {}),
     minWidth: 760,
     minHeight: 520,
     show: false,
@@ -232,7 +261,16 @@ function createWindow() {
   });
 
   const startHidden = process.argv.includes('--oculto') && prefs.tray && tray && !pendingLink;
-  win.once('ready-to-show', () => { if (!startHidden) win.show(); });
+  // maximize() também mostra a janela: com início escondido, só maximiza quando ela for aberta.
+  win.once('ready-to-show', () => {
+    if (!startHidden) {
+      if (prefs.maximized) win.maximize();
+      win.show();
+    } else if (prefs.maximized) {
+      win.once('show', () => win.maximize());
+    }
+  });
+  for (const event of ['resize', 'move', 'maximize', 'unmaximize']) win.on(event, rememberBounds);
   // Com a bandeja ligada, fechar a janela só a esconde: a call e a transmissão continuam.
   win.on('close', (event) => {
     if (quitting || !prefs.tray || !tray) return;
@@ -387,6 +425,15 @@ function setupIpc() {
   });
   ipcMain.handle('clipboard:write', async (_event, text) => {
     await clipboard.writeText(String(text ?? ''));
+    return true;
+  });
+
+  // Quadro de uma tela recebida (PNG em data URL), copiado como imagem.
+  ipcMain.handle('clipboard:image', async (_event, dataUrl) => {
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,') || dataUrl.length > 40 * 1024 * 1024) return false;
+    const image = nativeImage.createFromDataURL(dataUrl);
+    if (image.isEmpty()) return false;
+    await clipboard.writeImage(image);
     return true;
   });
 

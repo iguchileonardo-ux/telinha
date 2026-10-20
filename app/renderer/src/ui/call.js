@@ -1,5 +1,5 @@
 // Call: entrada/saída, microfone, quem está falando, telas, só-som, desenho com permissão.
-import { $, h, icon, avatar, toast, listNames, bridge } from './dom.js';
+import { $, h, icon, avatar, toast, listNames, bridge, copyImage, closePopover } from './dom.js';
 import { Stage } from '../stage.js';
 import { watchLevel } from '../audio.js';
 import { hexColorFor } from '../annotate.js';
@@ -23,6 +23,14 @@ export class CallView {
         this.drawPending.add(peerId);
         toast('Pedido enviado. Aguardando quem está transmitindo.');
         this.render();
+      },
+      onRelay: (peerId, on) => {
+        const session = this.app.session();
+        if (!session?.requestRelay(peerId, on)) return;
+        toast(on ? 'Pedido enviado. A tela será retransmitida para a turma.' : 'Retransmissão encerrada.');
+      },
+      onCopy: async (_peerId, dataUrl) => {
+        toast(await copyImage(dataUrl) ? 'Imagem copiada.' : 'Não foi possível copiar a imagem.');
       },
       onVolume: (peerId, v) => {
         const peer = this.app.session()?.peers.get(peerId);
@@ -90,6 +98,7 @@ export class CallView {
       stream: session.shareOf(p),
       volume: settings.volumes?.[`${p.uid}:tela`] ?? 1,
       draw: session.canDrawOn(p) ? 'allowed' : this.drawPending.has(p.id) ? 'pending' : 'none',
+      relay: session.relayMode(p) === 'on' || inCall.some((q) => q.id !== p.id && !q.via) ? session.relayMode(p) : null,
     })));
 
     this.#syncAudio(session, inCall, settings);
@@ -141,6 +150,9 @@ export class CallView {
     const share = $('shareBtn');
     share.replaceChildren(icon(session.sharing ? 'stop' : 'monitor', 17), session.sharing ? 'Parar' : 'Compartilhar');
     share.classList.toggle('stop', session.sharing);
+    const quality = $('qualityBtn');
+    quality.hidden = session.share?.kind !== 'screen';
+    if (quality.hidden && !$('qualityPop').hidden) closePopover();
 
     // Prévia da própria transmissão. Com telas recebidas no palco ela fica compacta,
     // fora das telas, para não cobrir o volume e o ponteiro de quem eu estou assistindo.
@@ -194,6 +206,8 @@ export class CallView {
   }
 
   setShareInfo(label, stream) {
+    this.shareLabel = label;
+    this.shareStats = null;
     $('selfLabel').textContent = label;
     this.stopSelfMeter?.();
     this.stopSelfMeter = null;
@@ -206,7 +220,22 @@ export class CallView {
     }
   }
 
+  // O que de fato sai para quem assiste: resolução, quadros e se a internet ou o processador estão no limite.
+  setShareStats(stats) {
+    this.shareStats = stats;
+    const parts = [this.shareLabel || 'Ao vivo'];
+    if (stats?.height && $('selfPreview') && !$('selfPreview').hidden) {
+      parts.push(`${stats.height}p ${stats.fps} qps`);
+      if (stats.limit) parts.push(stats.limit === 'cpu' ? 'processador no limite' : 'internet no limite');
+    }
+    const text = parts.join(' · ');
+    $('selfLabel').textContent = text;
+    $('selfLabel').title = stats?.kbps ? `${text} · ${Math.round(stats.kbps / 100) / 10} Mbps no total` : text;
+  }
+
   clearShareInfo() {
+    this.shareLabel = '';
+    this.shareStats = null;
     this.stopSelfMeter?.();
     this.stopSelfMeter = null;
     $('selfLevel').hidden = true;

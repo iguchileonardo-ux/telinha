@@ -1,5 +1,5 @@
 // Telinha: Turmas, chat, call, telas, reações, rádio e configurações.
-import { TurmaSession, normalizeServerUrl } from './turma.js';
+import { TurmaSession, normalizeServerUrl, qualityProfile, normalizeQuality } from './turma.js';
 import { loadSettings, saveSettings, takeLegacyRecent } from './settings.js';
 import { newRoomCode, inviteLink, parseRoomCode } from './codes.js';
 import { captureScreen, stopCapture } from './capture.js';
@@ -409,6 +409,7 @@ function wireSession(s) {
     scheduleRender();
   }));
   s.addEventListener('log', mine((d) => diag(d.text)));
+  s.addEventListener('share-stats', mine((d) => call.setShareStats(d)));
   s.addEventListener('peer-presence', mine((d) => {
     // Ao abrir a turma, quem já estava lá não conta como alguém que chegou.
     if (Date.now() - sessionOpenedAt > 6000) alerts.sound(d.present ? 'peerJoin' : 'peerLeave');
@@ -528,7 +529,7 @@ async function toggleShare() {
   starting = true;
   const s = session;
   try {
-    const result = await captureScreen({ quality: settings.quality, audio: settings.shareAudio, lastSource: settings.lastSource });
+    const result = await captureScreen({ fps: settings.fps, audio: settings.shareAudio, lastSource: settings.lastSource });
     if (!result) return;
     if (s !== session) { result.stream.getTracks().forEach((t) => t.stop()); stopCapture(); return; }
     await s.startShare(result.stream, { kind: result.kind, label: result.label });
@@ -553,11 +554,45 @@ async function toggleShare() {
 
 // ---------- configurações ----------
 
-const QUALITY_HINT = {
-  detail: 'Ideal para texto, código e navegação. Até 30 quadros por segundo.',
-  motion: 'Ideal para jogos. Até 60 quadros por segundo, usa mais internet.',
-  movie: 'Ideal para filmes: 24 quadros por segundo, som estéreo e um pouco mais de buffer para não travar.',
-};
+// Texto de apoio da escolha de quadros e resolução (configurações e popover da transmissão).
+function qualityHint(q) {
+  const { fps, res } = normalizeQuality(q);
+  const p = qualityProfile({ fps, res });
+  const use = {
+    24: '24 qps: para filmes. Som em qualidade maior e uma folga contra travadas (cerca de 1 s a mais de atraso).',
+    30: '30 qps: para texto, código e navegação. Quando a internet não aguenta, a nitidez é mantida.',
+    60: '60 qps: para jogos. Quando a internet não aguenta, a fluidez é mantida e a nitidez cai.',
+  }[fps];
+  const mbps = (p.maxBitrate / 1_000_000).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+  const size = res ? `Até ${mbps} Mbps por pessoa.` : 'Na resolução da tela, sem reduzir. Usa até 9 Mbps por pessoa em telas 1440p.';
+  return `${use} ${size} Pode ser mudado durante a transmissão.`;
+}
+
+function readQuality(fpsRoot, resRoot) {
+  return normalizeQuality({ fps: Number(segmentedValue(fpsRoot)), res: Number(segmentedValue(resRoot)) });
+}
+
+// Popover de qualidade durante a transmissão: a mudança vale na hora e fica salva.
+function openQualityPop() {
+  const sync = () => {
+    const q = session?.share?.q || normalizeQuality(settings);
+    segmented($('popFps'), String(q.fps));
+    segmented($('popRes'), String(q.res));
+    $('popQualityHint').textContent = qualityHint(q);
+  };
+  sync();
+  if (!showPopover($('qualityPop'), $('qualityBtn'), { place: 'above', align: 'center' })) return;
+  $('qualityPop').onclick = (e) => {
+    const btn = e.target.closest('button[data-value]');
+    if (!btn) return;
+    const root = btn.closest('.segmented');
+    segmented(root, btn.dataset.value);
+    const q = readQuality($('popFps'), $('popRes'));
+    app.saveSettings(q);
+    session?.setQuality(q);
+    sync();
+  };
+}
 const SIGNALING_HINT = {
   auto: 'Usa o servidor da Telinha para encontrar seus amigos e, se ele estiver fora do ar, relays públicos. Não precisa configurar nada.',
   server: 'Usa o seu servidor de sinalização. Todos na turma precisam usar o mesmo.',
@@ -571,7 +606,7 @@ function segmentedValue(root) {
 }
 
 function syncSettingsHints() {
-  $('qualityHint').textContent = QUALITY_HINT[segmentedValue($('setQuality'))] || '';
+  $('qualityHint').textContent = qualityHint(readQuality($('setFps'), $('setRes')));
   const signaling = segmentedValue($('setSignaling'));
   $('signalingHint').textContent = SIGNALING_HINT[signaling] || '';
   $('setServer').hidden = signaling !== 'server';
@@ -647,7 +682,8 @@ function openSettings() {
   renderAvatarPick($('setAvatar'), settings.avatar, settings.name);
   $('removeAvatar').hidden = !settings.avatar;
   segmented($('setTheme'), settings.theme);
-  segmented($('setQuality'), settings.quality);
+  segmented($('setFps'), String(settings.fps));
+  segmented($('setRes'), String(settings.res));
   segmented($('setSignaling'), settings.signaling);
   $('setServer').value = settings.serverUrl;
   $('setTurnUrl').value = settings.turnUrl;
@@ -703,7 +739,7 @@ async function saveSettingsFromDialog() {
     ...settings,
     name: $('setName').value.trim().slice(0, 32),
     theme: segmentedValue($('setTheme')) || 'dark',
-    quality: segmentedValue($('setQuality')) || 'detail',
+    ...readQuality($('setFps'), $('setRes')),
     signaling: segmentedValue($('setSignaling')) || 'auto',
     serverUrl: $('setServer').value.trim(),
     turnUrl: $('setTurnUrl').value.trim(),
@@ -744,7 +780,7 @@ async function saveSettingsFromDialog() {
   if (pendingAvatar !== undefined) await applyAvatar(pendingAvatar);
   if (session) {
     if (nameChanged) session.updateProfile({ name: settings.name });
-    session.setQuality(settings.quality);
+    session.setQuality(settings);
     if (micChanged) session.setMicDevice(settings.micId);
   }
   if (speakerChanged) setSpeaker(settings.speakerId, settings.speakerLabel);
@@ -825,6 +861,7 @@ function bind() {
   });
   $('reactBtn').addEventListener('click', () => reactions.open($('reactBtn')));
   $('radioBtn').addEventListener('click', () => radio.open($('radioBtn')));
+  $('qualityBtn').addEventListener('click', openQualityPop);
 
   // configurações
   $('settingsBtn').addEventListener('click', openSettings);
@@ -842,7 +879,7 @@ function bind() {
     renderAvatarPick($('setAvatar'), '', $('setName').value);
     $('removeAvatar').hidden = true;
   });
-  for (const id of ['setTheme', 'setQuality', 'setSignaling']) {
+  for (const id of ['setTheme', 'setFps', 'setRes', 'setSignaling']) {
     $(id).addEventListener('click', (e) => {
       const btn = e.target.closest('button[data-value]');
       if (!btn) return;

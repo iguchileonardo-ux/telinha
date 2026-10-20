@@ -7,7 +7,8 @@ export const defaults = {
   name: '',
   avatar: '', // data URL da foto de perfil (já recortada e reduzida)
   theme: 'dark', // 'dark' | 'light' | 'system'
-  quality: 'detail', // 'detail' (nitidez) | 'motion' (fluidez) | 'movie' (filme)
+  fps: 30, // quadros por segundo da transmissão: 24 | 30 | 60
+  res: 1080, // resolução da transmissão (altura): 480 | 720 | 1080 | 0 (original)
   shareAudio: true,
   lastSource: null, // { name, kind } da última fonte compartilhada
   volumes: {}, // volume por pessoa (userId -> 0..1)
@@ -55,7 +56,14 @@ export function loadSettings() {
     settings.userId = randomId(8);
     write(SETTINGS_KEY, settings);
   }
-  if (!['detail', 'motion', 'movie'].includes(settings.quality)) settings.quality = 'detail';
+  // Até a 2.3.3 a qualidade era um modo; converte uma vez para quadros por segundo e resolução.
+  if (saved && saved.fps === undefined && typeof saved.quality === 'string') {
+    settings.fps = { motion: 60, movie: 24 }[saved.quality] || 30;
+    settings.res = 0; // os modos antigos enviavam a resolução original
+  }
+  delete settings.quality;
+  if (![24, 30, 60].includes(settings.fps)) settings.fps = 30;
+  if (![480, 720, 1080, 0].includes(settings.res)) settings.res = 1080;
   if (!settings.volumes || typeof settings.volumes !== 'object') settings.volumes = {};
   return settings;
 }

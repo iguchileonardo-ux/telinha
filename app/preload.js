@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('telinha', {
   onUpdateReady: (callback) => listen('update:ready', callback),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
   writeClipboard: (text) => ipcRenderer.invoke('clipboard:write', text),
+  writeClipboardImage: (dataUrl) => ipcRenderer.invoke('clipboard:image', dataUrl),
   pendingLink: () => ipcRenderer.invoke('link:pending'),
   onLink: (callback) => listen('open-link', callback),
   // bandeja, notificações e registro de diagnóstico
