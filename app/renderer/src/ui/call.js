@@ -39,7 +39,6 @@ export class CallView {
     });
 
     $('joinCallBtn').addEventListener('click', () => this.app.session()?.joinCall({ withMic: true }));
-    $('joinMutedBtn').addEventListener('click', () => this.app.session()?.joinCall({ withMic: false }));
     $('leaveCallBtn').addEventListener('click', () => this.app.session()?.leaveCall());
     $('micBtn').addEventListener('click', () => this.toggleMute());
     $('shareBtn').addEventListener('click', () => this.app.toggleShare());

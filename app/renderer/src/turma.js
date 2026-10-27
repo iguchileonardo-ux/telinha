@@ -321,10 +321,12 @@ export class TurmaSession extends EventTarget {
 
   // ---- call ----
 
+  // Entra sempre silenciado. Com withMic o microfone já é aberto (faixa desligada),
+  // para o aviso de microfone desligado funcionar e o desmutar ser imediato.
   async joinCall({ withMic = true } = {}) {
     if (this.closed) return;
     this.inCall = true;
-    this.muted = !withMic;
+    this.muted = true;
     if (withMic) await this.#ensureMic();
     this.#syncStreams();
     this.#broadcastHello();

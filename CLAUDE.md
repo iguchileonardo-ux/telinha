@@ -69,6 +69,7 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil)
 - **Mudar durante a transmissão**: ícone de velocímetro (`#qualityBtn`) no dock, só enquanto transmite a tela; abre o popover `#qualityPop`, que aplica na hora (`session.setQuality`) e salva.
 - **Prévia mostra o que sai de fato**: evento `share-stats` de `TurmaSession` (a cada 2 s, com quem recebe direto) com resolução e quadros reais e `limit` (`bandwidth`/`cpu`, só depois da carência de 20 s). O rótulo vira "Ao vivo · áudio do PC · 720p 58 qps · internet no limite"; o `title` traz o total em Mbps.
 - **Copiar imagem** da tela recebida: botão na barra da tela (`Tile.frame()` gera PNG na resolução recebida). No app usa `bridge.writeClipboardImage` (IPC `clipboard:image`, `nativeImage`); no navegador `navigator.clipboard.write` (sem `fetch` do data URL, porque a CSP não permite `connect-src data:`).
+- **Entrada na call sempre silenciada** (27/10/2026): `joinCall` sempre começa com `muted = true`. Com `withMic` (botão "Entrar na call") o microfone já é aberto com a faixa desligada, para o aviso "Seu microfone está desligado. Aperte M para falar." funcionar e o desmutar ser imediato, sem renegociar. O botão "Entrar sem microfone" (`#joinMutedBtn`) foi removido por ter ficado redundante. Começar a transmitir fora da call continua entrando com `withMic: false` (sem abrir o microfone).
 - **Tamanho e posição da janela** lembrados em `preferencias.json` (`bounds`, `maximized`), só se ainda couberem num monitor (`savedBounds`). Com início escondido, maximiza só quando a janela for aberta (`maximize()` também mostra a janela).
 
 ## Fluxo de trabalho
@@ -91,6 +92,10 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil)
 - Com "Efeitos de animação" do Windows desligados, `animationend` não dispara: toda animação que remove elemento precisa de `setTimeout` de reserva.
 - **Medição de envio pelo `pc.getStats()`** pegava o `outbound-rtp` com mais bytes, que da 2ª transmissão em diante é o envio antigo (sem faixa, parado): media 0 kbps e o repasse nunca entrava. Medir pelo `sender.getStats()` dos envios com a faixa atual (`#videoTracksTo`).
 - No registro de 17/10/2026, quem tinha 135 a 700 ms de atraso (internet ruim) virou repassador de quem estava a 14 ms de quem transmitia: a tela chegava recodificada e ruim. Por isso as regras de atraso no repasse (item 5 acima).
+
+## Situação em 27/10/2026
+
+- Entrada na call sempre silenciada (ver "Qualidade da transmissão e outras melhorias (2.4.0)"), incluída na 2.4.0, que continua não publicada. Verificado só a sintaxe (`node --check`); não testado no app.
 
 ## Situação em 20/10/2026
 
