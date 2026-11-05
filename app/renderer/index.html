@@ -2,7 +2,7 @@
 <html lang="pt-BR" data-theme="dark">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' blob:; style-src 'self'; img-src 'self' data: blob: https://i.ytimg.com; media-src 'self' blob: mediastream:; connect-src 'self' ws: wss:" />
   <title>Telinha</title>
@@ -196,7 +196,7 @@
       </div>
     </div>
 
-    <div class="field">
+    <div class="field" id="qualityField">
       <span>Qualidade da transmissão</span>
       <div class="quality-grid">
         <small>Quadros por segundo</small>
@@ -223,7 +223,7 @@
         <select id="setMic" aria-label="Microfone"></select>
       </div>
       <div class="mic-meter" id="micMeter" title="Fale para testar o microfone"><i></i></div>
-      <div class="device-row">
+      <div class="device-row" id="speakerRow">
         <i data-icon="volume" data-size="16"></i>
         <select id="setSpeaker" aria-label="Saída de áudio"></select>
       </div>

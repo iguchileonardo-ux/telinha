@@ -25,6 +25,11 @@ if errorlevel 1 call npx wrangler login || goto erro_pop
 
 echo.
 echo  === 3/4  Publicando o servidor ===
+rem A versao web (celular) vai junto: o servidor exige a pasta publico.
+popd
+if not exist "node_modules\esbuild" call npm install --no-audit --no-fund >nul 2>&1
+call node ferramentas\montar-web.mjs >nul || goto erro
+pushd servidor-cloudflare
 rem Primeira vez: o Cloudflare pode pedir para escolher um subdominio workers.dev.
 call npx wrangler deploy || goto erro_pop
 call npx wrangler deploy > "%~dp0servidor-log.txt" 2>&1 || goto erro_pop

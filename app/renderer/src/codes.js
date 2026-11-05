@@ -19,12 +19,14 @@ export function inviteLink(code) {
   return `telinha://sala/${code}`;
 }
 
-// Aceita "telinha://sala/abcd-efgh-jkmn", o código com ou sem traços, maiúsculo ou não.
+// Aceita "telinha://sala/abcd-efgh-jkmn", o link da versão web ("https://.../?sala=abcd-efgh-jkmn"),
+// o código com ou sem traços, maiúsculo ou não.
 // strict = true exige que o texto seja só o link/código (usado ao ler a área de transferência).
 export function parseRoomCode(text, { strict = false } = {}) {
   if (typeof text !== 'string') return null;
   let value = text.trim().toLowerCase();
-  const fromLink = value.match(/^telinha:\/\/(?:sala\/)?([a-z0-9-]+)\/?$/);
+  const fromLink = value.match(/^telinha:\/\/(?:sala\/)?([a-z0-9-]+)\/?$/)
+    || value.match(/^https?:\/\/[^\s/?#]+\/?\?(?:[^\s#]*&)?sala=([a-z0-9-]+)(?:[&#]\S*)?$/);
   if (fromLink) value = fromLink[1];
   else if (strict && value.length > 14) return null;
   const compact = value.replace(/[\s-]/g, '');

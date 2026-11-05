@@ -189,9 +189,11 @@ const NOSTR_RELAYS = [
 export class TurmaSession extends EventTarget {
   // builtinServer: servidor da Telinha (wss://...) ou null para usar os relays Nostr.
   // extraIce: servidores TURN fornecidos pelo servidor da Telinha.
-  constructor({ code, settings, builtinServer = null, extraIce = [] }) {
+  // forward = false (celular): só assiste; nunca repassa telas nem serve de ponte para os outros.
+  constructor({ code, settings, builtinServer = null, extraIce = [], forward = true }) {
     super();
     this.code = code;
+    this.noForward = !forward;
     this.settings = settings;
     this.selfId = selfId;
     this.uid = settings.userId;
@@ -472,7 +474,7 @@ export class TurmaSession extends EventTarget {
 
   // 'on': eu retransmito esta tela; 'off': posso pedir; null: não disponível.
   relayMode(peer) {
-    if (!peer?.sharing || peer.sharing.kind !== 'screen' || !peer.inCall || peer.via || !peer.canRelay || !peer.canAsk) return null;
+    if (this.noForward || !peer?.sharing || peer.sharing.kind !== 'screen' || !peer.inCall || peer.via || !peer.canRelay || !peer.canAsk) return null;
     return peer.sharing.manualBy === this.selfId ? 'on' : 'off';
   }
 
@@ -665,6 +667,7 @@ export class TurmaSession extends EventTarget {
         : null,
       tree: 1, // sabe repassar e receber telas por um repassador
       man: 1, // aceita o pedido de retransmissão manual (feed com role 'ask')
+      ...(this.noForward ? { fwd: 0 } : {}), // celular: não repassa telas nem serve de ponte
       up: this.uplink || undefined,
       drawAllow: [...this.drawAllow],
       // Quem está conectado direto comigo (para a ponte).
@@ -775,7 +778,7 @@ export class TurmaSession extends EventTarget {
     const directIds = new Set(directs.map((p) => p.id));
     const candidates = new Map();
     for (const p of directs) {
-      if (!p.uid || !p.links) continue;
+      if (!p.uid || !p.links || p.noForward) continue; // celular não serve de ponte
       for (const sid of p.links) {
         if (sid === this.selfId || directIds.has(sid)) continue;
         if (!candidates.has(sid)) candidates.set(sid, []);
@@ -816,7 +819,7 @@ export class TurmaSession extends EventTarget {
     const now = Date.now();
     const wanted = new Map();
     const pairs = new Set();
-    const directs = [...this.peers.values()].filter((p) => !p.via && p.uid && p.links);
+    const directs = this.noForward ? [] : [...this.peers.values()].filter((p) => !p.via && p.uid && p.links);
     for (const a of directs) {
       for (const b of directs) {
         if (a === b || a.links.includes(b.id) || b.links.includes(a.id)) continue;
@@ -824,7 +827,7 @@ export class TurmaSession extends EventTarget {
         pairs.add(key);
         if (!this.pairSince.has(key)) this.pairSince.set(key, now);
         if (now - this.pairSince.get(key) < BRIDGE_DELAY_MS || !a.inCall || !b.inCall) continue;
-        const common = directs.filter((q) => q !== a && q !== b && q.links.includes(a.id) && q.links.includes(b.id));
+        const common = directs.filter((q) => q !== a && q !== b && !q.noForward && q.links.includes(a.id) && q.links.includes(b.id));
         if (common.some((q) => q.uid < this.uid)) continue;
         for (const [stream, kind] of [[this.micOf(a), 'mic'], [this.shareOf(a), a.sharing?.kind]]) {
           if (stream) wanted.set(`${stream.id}>${b.id}`, { stream, target: b.id, kind, from: a.id });
@@ -996,6 +999,7 @@ export class TurmaSession extends EventTarget {
     peer.drawAllow = Array.isArray(data.drawAllow) ? data.drawAllow.filter((x) => typeof x === 'string').slice(0, 32) : [];
     peer.canRelay = data.tree === 1;
     peer.canAsk = data.man === 1;
+    peer.noForward = data.fwd === 0;
     peer.up = Math.max(0, Math.min(1_000_000, Number(data.up) || 0));
     peer.lat = parseLat(data.lat);
     // A outra pessoa não recebeu a minha apresentação: mando de novo só para ela.
@@ -1507,7 +1511,7 @@ export class TurmaSession extends EventTarget {
   // Repassa a tela de quem transmite aos espectadores que ele indicou para mim.
   #syncRelaying() {
     const wanted = new Map();
-    for (const owner of this.peers.values()) {
+    for (const owner of this.noForward ? [] : this.peers.values()) {
       const relays = owner.sharing?.relays;
       if (owner.via || !owner.inCall || !relays) continue;
       const sid = owner.sharing.streamId;
@@ -1655,7 +1659,7 @@ export class TurmaSession extends EventTarget {
 
   // Um espectador pede para retransmitir a minha tela para a turma (ou deixar de retransmitir).
   #onRelayAsk(peer, on, now) {
-    if (!peer.uid || peer.via || !peer.inCall || !peer.canRelay) return;
+    if (!peer.uid || peer.via || !peer.inCall || !peer.canRelay || peer.noForward) return;
     if (!on) {
       if (this.manualRelay !== peer.id) return;
       this.#log(`${this.#who(peer.id)} deixou de retransmitir a minha tela; todos voltam a receber direto.`);
@@ -1784,7 +1788,7 @@ export class TurmaSession extends EventTarget {
   // Bom repassador: perto de mim (pelo menor atraso já medido, que não sobe com a minha
   // própria fila de envio) e sem perda de pacotes.
   #goodRelay(p) {
-    return p.minRtt != null && p.minRtt <= RELAY_MAX_RTT && (p.net?.loss ?? 0) < 0.03;
+    return !p.noForward && p.minRtt != null && p.minRtt <= RELAY_MAX_RTT && (p.net?.loss ?? 0) < 0.03;
   }
 
   // O espectador pode receber por este repassador sem piorar o caminho.

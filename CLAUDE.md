@@ -1,6 +1,6 @@
 # Telinha — contexto para o Claude
 
-App desktop (Windows) do Leo para a turma de amigos: chat, call de voz, compartilhamento de tela, reações, ponteiro/desenho, rádio do YouTube. Tudo P2P (WebRTC), sem VPN, entrada por convite `telinha://sala/xxxx-xxxx-xxxx`.
+App desktop (Windows) do Leo para a turma de amigos: chat, call de voz, compartilhamento de tela, reações, ponteiro/desenho, rádio do YouTube. Tudo P2P (WebRTC), sem VPN, entrada por convite `telinha://sala/xxxx-xxxx-xxxx`. Versão web para assistir pelo celular no mesmo endereço do servidor (ver "Versão web (celular)").
 
 - Pasta no PC: `C:\Users\leona\Documents\Telinha`
 - Repositório: https://github.com/iguchileonardo-ux/telinha (público)
@@ -33,9 +33,10 @@ app/renderer/src/
   main.js              fluxo do app, configurações, escolha de servidor (builtin -> nostr)
   devices.js           escolha de microfone e saída
   alerts.js            sons sintetizados (WebAudio) e pedido de notificação ao processo principal
+  platform.js          app ou versão web, celular (sem captura de tela), toque, volume e saída de áudio controláveis
   ui/                  chat, call, reações, rádio, membros
-servidor-cloudflare/   Worker (sinalização + TURN)
-ferramentas/           scripts auxiliares (repo, servidor, node portátil)
+servidor-cloudflare/   Worker (sinalização + TURN + arquivos da versão web em publico/, gerada e fora do git)
+ferramentas/           scripts auxiliares (repo, servidor, node portátil, montar-web.mjs)
 ```
 
 ## Como a conexão funciona
@@ -72,11 +73,25 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil)
 - **Entrada na call sempre silenciada** (27/10/2026): `joinCall` sempre começa com `muted = true`. Com `withMic` (botão "Entrar na call") o microfone já é aberto com a faixa desligada, para o aviso "Seu microfone está desligado. Aperte M para falar." funcionar e o desmutar ser imediato, sem renegociar. O botão "Entrar sem microfone" (`#joinMutedBtn`) foi removido por ter ficado redundante. Começar a transmitir fora da call continua entrando com `withMic: false` (sem abrir o microfone).
 - **Tamanho e posição da janela** lembrados em `preferencias.json` (`bounds`, `maximized`), só se ainda couberem num monitor (`savedBounds`). Com início escondido, maximiza só quando a janela for aberta (`maximize()` também mostra a janela).
 
+## Versão web (celular), desde a 2.4.0
+
+- Só para **assistir**, entrar na call e no chat pelo navegador do Android e do iPhone. Transmitir do celular foi descartado (exigiria app nativo; no iPhone, conta da Apple de US$ 99/ano). Decisão do Leo em 05/11/2026: os amigos querem só assistir.
+- Endereço: o do servidor (`https://telinha.leomaig.workers.dev`). Convite web: `/?sala=<código>`. O Worker serve a pasta `servidor-cloudflare/publico` (Workers Static Assets, `run_worker_first: true`, porque a sinalização usa o WebSocket em `/`); o que não é arquivo cai no texto "Servidor da Telinha em funcionamento".
+- `ferramentas/montar-web.mjs` roda o `build.mjs` e monta `publico/`: o mesmo `index.html` com `data-web="1"`, manifesto (adicionar à tela inicial), ícone e `?v=` nos arquivos para o celular não usar versão velha. Sem service worker, de propósito (sempre a versão atual).
+- Publicar: `Publicar versao web.bat` (wrangler deploy, que também reinicia o servidor: quem está conectado reconecta sozinho). O `Publicar atualizacao.bat` chama ele no fim com `/semPausa` (sem login no Cloudflare, só avisa). O `Configurar servidor.bat` também monta a versão web antes do deploy, porque o wrangler exige a pasta `publico`.
+- Na web, `isWeb` (platform.js): servidor = a própria origem (`ws(s)://`), TURN por `fetch('/turn')` com o cabeçalho `x-telinha`. `canShare` é falso no celular (Android, iPhone, iPad): some o Compartilhar, o velocímetro e a qualidade nas configurações. O rádio some em toda a versão web (o player do YouTube só existe no app). Nas configurações web aparecem só os sons (sem notificações, bandeja e abrir com o Windows); a saída de áudio some onde não há `setSinkId`.
+- Convites: o app continua copiando `telinha://`; o menu do nome da turma ganhou "Copiar link para celular" (só com o servidor da Telinha, `signaling: 'auto'`). Na web o convite copiado é o link https. `parseRoomCode` aceita os dois. Abrindo pelo link sem nome salvo, o código já vai para a caixa de convite e o Entrar vira o botão principal; o `?sala=` sai do endereço depois de lido.
+- Celular na rede (`forward: false` na `TurmaSession`, `fwd: 0` no `hello`, `peer.noForward`): pode receber pelo repassador, mas nunca é escolhido como repassador (`#goodRelay`), não atende pedido de retransmissão manual (o botão nem aparece nele), não serve de ponte (`#refreshBridges`, `#syncForwards`) e ignora `sharing.relays` que o aponte (transmissor 2.3.2, que não conhece o `fwd`). Mensagens pela ponte ele ainda repassa (é barato).
+- Layout de celular: `@media (max-width: 720px), (max-height: 500px) and (pointer: coarse)` no style.css, igual a `compactLayout` em main.js (o app tem janela mínima de 760x520, então nunca entra nele). Sem barra lateral: outras turmas, criar e entrar por convite ficam no menu do nome da turma. Abas só com ícone abaixo de 420 px. Campos com 16 px (no iPhone, menos que isso dá zoom). `--vvh` (visualViewport) para o teclado não cobrir a caixa de mensagem. Áreas seguras (`env(safe-area-inset-*)`).
+- Toque (`html.touch`): um toque na tela recebida mostra os controles por 4 s (`show-ui`); escondidos, não recebem toques. Tela cheia: `requestFullscreen` e, no Android, trava em paisagem; no iPhone, `webkitEnterFullscreen` do vídeo (player do sistema). Wake Lock com tela aberta na call. iPhone não deixa a página mudar volume: `html.no-volume` esconde os controles de volume (fica o mudo). Aviso de microfone desligado fala em "toque no microfone" em vez de "aperte M".
+- Limitações conhecidas: com a tela do celular bloqueada ou o navegador em segundo plano, o iPhone pausa a página e a pessoa reconecta ao voltar; no iPhone, sem "adicionar à tela inicial" o Safari pode apagar as turmas salvas depois de dias sem uso (basta abrir o link de novo).
+
 ## Fluxo de trabalho
 
 - Testes: Playwright com 2 ou 3 contextos, servidor estático em `app/renderer` (porta 5173), `server/server.mjs` (8080) e `wrangler dev` (8787). No navegador sem Electron, `window.__telinhaServer = { server, iceServers }` simula o servidor embutido e `?sala=<código>` entra direto numa turma. `window.__telinhaBlocked` (Set de peerIds) simula duas pessoas sem conexão direta.
 - Repasse de carga nos testes: `globalThis.__telinhaLoad = (peerId) => ({ frac: 1, cpu: 0, kbps: 2500 })` força a medição de envio (sem ele, usa os dados reais do WebRTC). `globalThis.__telinhaRtt = (peerId) => ms` força o atraso medido (simula alguém longe). `globalThis.__telinhaDiag = (texto) => ...` recebe as linhas do registro de diagnóstico no navegador. Para simular a tela, `__telinha.session.startShare(canvas.captureStream(30))`. Com `frac: 1` em quem transmite e 3 a 6 contextos, o repasse entra em cerca de 25 s. `__telinhaBlocked` no repassador simula repasse que não entrega.
 - Interface com ponte simulada: um `window.telinha` falso (Proxy que devolve funções assíncronas vazias) permite testar configurações, avisos e registro no navegador. `app/main.js` foi testado com um módulo `electron` falso (janela, bandeja, notificações e IPC simulados), sem abrir o Electron de verdade.
+- Testes da versão web: `wrangler dev` (8787) depois de `node ferramentas/montar-web.mjs` e Playwright com `devices['iPhone 13']` e `devices['Pixel 7 landscape']` (Chromium emulando; não há WebKit no ambiente de testes). Ponte do app simulada com `window.telinha` falso servindo `app/renderer` em 5173 com `appInfo().server = 'ws://127.0.0.1:8787'`.
 - Publicar versão: aumentar `version` no package.json e rodar `Publicar atualizacao.bat` (git push + tag `vX.Y.Z` + cria a Release vazia + `electron-builder --publish always` + `ferramentas/corrigir-release.mjs` para conferir + copia o instalador). O resultado da conferência fica em `publicar-log.txt`.
 - Se a atualização automática não chegar aos amigos: rodar `Corrigir atualizacao.bat` (junta Releases repetidas) e conferir se `https://github.com/iguchileonardo-ux/telinha/releases/download/vX.Y.Z/latest.yml` responde 200.
 - Configurar servidor: `Configurar servidor.bat` (wrangler login/deploy, grava a URL no package.json, TURN opcional).
@@ -92,6 +107,11 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil)
 - Com "Efeitos de animação" do Windows desligados, `animationend` não dispara: toda animação que remove elemento precisa de `setTimeout` de reserva.
 - **Medição de envio pelo `pc.getStats()`** pegava o `outbound-rtp` com mais bytes, que da 2ª transmissão em diante é o envio antigo (sem faixa, parado): media 0 kbps e o repasse nunca entrava. Medir pelo `sender.getStats()` dos envios com a faixa atual (`#videoTracksTo`).
 - No registro de 17/10/2026, quem tinha 135 a 700 ms de atraso (internet ruim) virou repassador de quem estava a 14 ms de quem transmitia: a tela chegava recodificada e ruim. Por isso as regras de atraso no repasse (item 5 acima).
+
+## Situação em 05/11/2026
+
+- **Versão web para assistir pelo celular** escrita no PC, dentro da 2.4.0 (ainda não publicada, package.json continua em 2.4.0). Ver "Versão web (celular)". Para publicar: `Publicar atualizacao.bat` (app e web) ou só `Publicar versao web.bat`.
+- Testado com Playwright (Chromium, `wrangler dev`): PC transmitindo pela web e pelo app com ponte simulada, iPhone e Android emulados entram pelo link, recebem a tela (1920x1080), chat nos dois sentidos, controles por toque, tela cheia no Android, menu da turma no celular, configurações do celular, sem rolagem lateral, convite `telinha://` no app e link para celular no menu; com o transmissor forçado ao limite, os dois celulares passaram a receber pelo PC2 em cerca de 30 s e nenhum celular repassou. **Não testado em celulares de verdade nem no Safari real** (o ambiente de testes só tem Chromium): conferir no iPhone a tela cheia, o som da tela recebida e a volta depois de bloquear a tela.
 
 ## Situação em 27/10/2026
 

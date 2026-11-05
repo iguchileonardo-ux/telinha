@@ -3,6 +3,7 @@ import { $, h, icon, avatar, toast, listNames, bridge, copyImage, closePopover }
 import { Stage } from '../stage.js';
 import { watchLevel } from '../audio.js';
 import { hexColorFor } from '../annotate.js';
+import { canShare, isWeb, touch } from '../platform.js';
 
 export class CallView {
   // app: { session(), settings(), saveVolume, toggleShare(), onSpeakingChange() }
@@ -112,7 +113,9 @@ export class CallView {
       const sharing = inCall.filter((p) => p.sharing);
       $('lobbyText').textContent = sharing.length
         ? `${listNames(sharing.map((p) => p.name))} ${sharing.length === 1 ? 'está transmitindo' : 'estão transmitindo'}. Entre para assistir.`
-        : 'Entre para conversar por voz, compartilhar a tela ou ouvir o rádio.';
+        : canShare
+          ? (isWeb ? 'Entre para conversar por voz e compartilhar a tela.' : 'Entre para conversar por voz, compartilhar a tela ou ouvir o rádio.')
+          : 'Entre para conversar por voz e assistir quando alguém transmitir.';
     }
 
     // Pessoas na call
@@ -145,7 +148,7 @@ export class CallView {
     const mic = $('micBtn');
     mic.replaceChildren(icon(session.muted ? 'micOff' : 'mic'));
     mic.classList.toggle('off', session.muted);
-    mic.title = session.muted ? 'Ligar microfone (M)' : 'Desligar microfone (M)';
+    mic.title = touch ? (session.muted ? 'Ligar microfone' : 'Desligar microfone') : session.muted ? 'Ligar microfone (M)' : 'Desligar microfone (M)';
     const share = $('shareBtn');
     share.replaceChildren(icon(session.sharing ? 'stop' : 'monitor', 17), session.sharing ? 'Parar' : 'Compartilhar');
     share.classList.toggle('stop', session.sharing);
@@ -191,7 +194,7 @@ export class CallView {
       since ||= performance.now();
       if (performance.now() - since > 800 && Date.now() - (this.muteWarned || 0) > 30000) {
         this.muteWarned = Date.now();
-        toast('Seu microfone está desligado. Aperte M para falar.', 3500);
+        toast(touch ? 'Seu microfone está desligado. Toque no microfone para falar.' : 'Seu microfone está desligado. Aperte M para falar.', 3500);
       }
     });
   }

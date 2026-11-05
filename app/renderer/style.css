@@ -59,7 +59,7 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-[hidden] { display: none !important; }
+[hidden], .unsupported { display: none !important; }
 
 html, body { height: 100%; }
 body {
@@ -548,6 +548,7 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
   line-height: 1.45;
 }
 .composer textarea:focus { box-shadow: none; }
+.composer textarea:focus-visible { outline: none; } /* a borda da caixa já mostra o foco */
 
 /* ---------- call ---------- */
 #callView { overflow: hidden; }
@@ -623,9 +624,19 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
 }
 .tile-tools { right: 10px; top: 10px; transform: translateY(-4px); }
 .tile-controls { right: 10px; bottom: 10px; transform: translateY(4px); }
-.tile:hover .tile-controls, .tile:focus-within .tile-controls,
-.tile:hover .tile-tools, .tile:focus-within .tile-tools,
+@media (hover: hover) {
+  .tile:hover .tile-controls, .tile:hover .tile-tools { opacity: 1; transform: none; }
+}
+.tile:has(:focus-visible) .tile-controls, .tile:has(:focus-visible) .tile-tools,
+.tile.show-ui .tile-controls, .tile.show-ui .tile-tools,
 .tile.mode-pointer .tile-tools, .tile.mode-draw .tile-tools { opacity: 1; transform: none; }
+/* Toque: controles escondidos não recebem toques (senão um toque no vídeo cairia num botão invisível). */
+html.touch .tile:not(.show-ui):not(.mode-pointer):not(.mode-draw) :is(.tile-controls, .tile-tools) { pointer-events: none; }
+html.touch .tile .icon-btn.small { width: 38px; height: 38px; border-radius: 10px; }
+html.touch .tile-tools, html.touch .tile-controls { border-radius: 13px; }
+.tile.mode-pointer, .tile.mode-draw { touch-action: none; }
+/* iPhone: o volume não pode ser mudado pela página, só o mudo. */
+html.no-volume input[type="range"].volume { display: none; }
 .tile-tools .icon-btn, .tile-controls .icon-btn { color: #ececee; }
 .tile-tools .icon-btn:hover, .tile-controls .icon-btn:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
 .tile-tools .icon-btn.active { color: #9aa8ff; background: rgba(154, 168, 255, 0.18); }
@@ -1072,3 +1083,77 @@ input[type="range"].volume.wide { flex: 1; width: auto; }
 .quality-pop { min-width: 300px; }
 .quality-pop .segmented { margin: 0 2px; }
 .quality-pop .segmented button { padding: 0 8px; }
+
+/* ---------- celular ---------- */
+/* Mesma condição de compactLayout em main.js. */
+@media (max-width: 720px), (max-height: 500px) and (pointer: coarse) {
+  :root {
+    --titlebar: calc(50px + env(safe-area-inset-top, 0px));
+    --dock-space: calc(74px + env(safe-area-inset-bottom, 0px));
+  }
+  body { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
+  /* Texto de 16 px nos campos: abaixo disso o iPhone dá zoom ao tocar no campo. */
+  input:not([type="checkbox"]):not([type="range"]), textarea, select { font-size: 16px; }
+  .join input { font-size: 15px; }
+  .join.compact input { font-size: 16px; height: 36px; }
+  .join.compact .btn { height: 36px; }
+
+  .titlebar {
+    gap: 4px;
+    padding: env(safe-area-inset-top, 0px) max(8px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px));
+  }
+  .brand { width: auto; }
+  body:not([data-screen="welcome"]) .brand { display: none; }
+  .turma-title { max-width: 38vw; padding: 0 8px; margin-left: -6px; }
+  #inviteBtn { display: none; } /* "Copiar convite" fica no menu do nome da turma */
+  .avatars-btn .avatar:nth-child(n + 3) { display: none; }
+  .avatars-btn { padding: 0 4px; }
+
+  .app { bottom: auto; height: calc(var(--vvh, 100dvh) - var(--titlebar)); }
+  .rail { display: none; }
+  .content { margin: 0; border-radius: 0; border-width: 1px 0 0; }
+
+  #welcome { padding: 20px max(18px, env(safe-area-inset-left, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)); place-items: start center; }
+  .home { margin: 4vh 0 0; }
+  .home h1 { font-size: 24px; }
+
+  .msg { padding: 6px 12px 2px; gap: 10px; }
+  .msg.cont { padding-left: 50px; }
+  .msg-time { left: 4px; width: 38px; }
+  .composer { margin: 6px max(8px, env(safe-area-inset-left, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)); }
+
+  .stage { inset: 8px 8px var(--dock-space) 8px; flex-direction: column; gap: 8px; }
+  #callView:has(.people.compact) .stage { bottom: calc(var(--dock-space) + 40px); }
+  .stage .grid { gap: 8px; }
+  .stage.focus .strip { flex-direction: row; width: auto; height: 64px; overflow-x: auto; overflow-y: hidden; }
+  .stage.focus .strip .tile { height: 100%; }
+  .tile { border-radius: 12px; }
+  .tile-name { left: 8px; top: 8px; }
+  .tile-tools { right: 8px; top: 8px; }
+  .tile-controls { right: 8px; bottom: 8px; }
+
+  .people { inset: 0 0 var(--dock-space) 0; gap: 20px; padding: 16px; }
+  .people.compact { inset: auto 0 calc(var(--dock-space) + 2px) 0; justify-content: center; }
+  .lobby { padding: 20px 24px calc(20px + env(safe-area-inset-bottom, 0px)); }
+  .dock { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  .dock .icon-btn { width: 44px; height: 44px; }
+  .audio-shares { top: 8px; width: calc(100% - 16px); }
+  .audio-share { justify-content: center; }
+  .draw-requests { left: 12px; right: 12px; top: 10px; }
+
+  .float-reaction { bottom: calc(var(--dock-space) + 8px); }
+  .float-reaction img { width: 56px; height: 56px; }
+
+  .popover { max-width: calc(100vw - 16px); }
+  #membersPop, .reactions-pop { width: min(300px, calc(100vw - 16px)); }
+  .menu-item { height: 40px; }
+  .modal { width: calc(100vw - 20px); max-height: calc(var(--vvh, 100dvh) - 24px); padding: 18px; }
+  .modal-foot .btn { height: 40px; }
+  .segmented.full button { height: 36px; }
+  .toast { top: calc(var(--titlebar) + 8px); }
+}
+
+/* Celular estreito: abas só com o ícone. */
+@media (max-width: 420px) {
+  .tabs button { font-size: 0; gap: 0; padding: 0 14px; }
+}

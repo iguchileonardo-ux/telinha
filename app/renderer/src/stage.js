@@ -2,6 +2,7 @@
 import { icon } from './icons.js';
 import { watchLevel } from './audio.js';
 import { Annotator } from './annotate.js';
+import { touch } from './platform.js';
 
 const GAP = 12;
 
@@ -18,6 +19,12 @@ export class Stage {
     this.tiles = new Map();
     this.focusId = null;
     new ResizeObserver(() => this.layout()).observe(root);
+    // Ao sair da tela cheia, o celular volta a girar livremente.
+    const unlock = () => {
+      if (!(document.fullscreenElement || document.webkitFullscreenElement)) screen.orientation?.unlock?.();
+    };
+    document.addEventListener('fullscreenchange', unlock);
+    document.addEventListener('webkitfullscreenchange', unlock);
   }
 
   get size() {
@@ -214,10 +221,20 @@ class Tile {
     });
     for (const node of [slider, tools, controls]) {
       node.addEventListener('click', (e) => e.stopPropagation());
-      node.addEventListener('pointerdown', (e) => e.stopPropagation());
+      node.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        if (touch) this.#showControls(); // usando os controles, eles continuam à vista
+      });
     }
-    el.addEventListener('click', () => { if (!this.mode) this.hooks.onFocus(); });
+    // Com toque não existe "passar o mouse": um toque mostra os controles por alguns segundos.
+    el.addEventListener('click', () => {
+      if (this.mode) return;
+      if (touch) this.#showControls();
+      else this.hooks.onFocus();
+    });
     el.addEventListener('dblclick', () => { if (!this.mode) this.fullscreen(); });
+    // No iPhone a tela cheia é a do próprio vídeo; ao sair dela o vídeo pode ficar parado.
+    video.addEventListener('webkitendfullscreen', () => video.play().catch(() => {}));
     el.addEventListener('keydown', (e) => {
       if (e.key === 'f' || e.key === 'F') this.fullscreen();
       if (e.key === 'Escape') this.#setMode(null);
@@ -275,6 +292,12 @@ class Tile {
     btn.append(icon(name, 16));
     btn.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     return btn;
+  }
+
+  #showControls() {
+    this.el.classList.add('show-ui');
+    clearTimeout(this.uiTimer);
+    this.uiTimer = setTimeout(() => this.el.classList.remove('show-ui'), 4000);
   }
 
   #setMode(mode) {
@@ -375,15 +398,35 @@ class Tile {
   }
 
   fullscreen() {
-    if (document.fullscreenElement === this.el) document.exitFullscreen().catch(() => {});
-    else this.el.requestFullscreen().catch(() => {});
+    const doc = document;
+    const current = doc.fullscreenElement || doc.webkitFullscreenElement;
+    if (current === this.el) {
+      const exit = doc.exitFullscreen || doc.webkitExitFullscreen;
+      Promise.resolve(exit?.call(doc)).catch(() => {});
+      return;
+    }
+    const request = this.el.requestFullscreen || this.el.webkitRequestFullscreen;
+    if (!request) { this.#videoFullscreen(); return; }
+    Promise.resolve(request.call(this.el))
+      .then(() => {
+        // Celular: tela de computador (deitada) ocupa melhor a tela com o aparelho deitado.
+        if (touch && this.video.videoWidth > this.video.videoHeight) screen.orientation?.lock?.('landscape').catch(() => {});
+      })
+      .catch(() => this.#videoFullscreen());
+  }
+
+  // iPhone: o Safari só deixa o vídeo (não a página) em tela cheia, com o player do sistema.
+  #videoFullscreen() {
+    try { this.video.webkitEnterFullscreen?.(); } catch { /* indisponível */ }
   }
 
   destroy() {
+    clearTimeout(this.uiTimer);
     this.stopMeter();
     this.annotator.destroy();
     clearInterval(this.strokeTimer);
     if (document.fullscreenElement === this.el) document.exitFullscreen().catch(() => {});
+    else if (document.webkitFullscreenElement === this.el) document.webkitExitFullscreen?.();
     this.stream?.removeEventListener('addtrack', this.syncAudio);
     this.stream?.removeEventListener('removetrack', this.syncAudio);
     this.video.srcObject = null;

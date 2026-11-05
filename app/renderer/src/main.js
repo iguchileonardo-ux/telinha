@@ -18,6 +18,7 @@ import { Members } from './ui/members.js';
 import { listDevices, setSpeaker, micConstraints } from './devices.js';
 import { watchLevel } from './audio.js';
 import { createAlerts, scheduleSound, SOUNDS, SOUND_GROUPS } from './alerts.js';
+import { isWeb, canShare, touch, volumeControl, sinkControl, APP_HEADER, webInviteLink } from './platform.js';
 
 let settings = loadSettings();
 const alerts = createAlerts(() => settings, (text) => diag(text));
@@ -107,6 +108,12 @@ const members = new Members(app);
 
 // ---------- aparência ----------
 
+// Mesma condição do layout de celular no style.css.
+const compactLayout = window.matchMedia('(max-width: 720px), (max-height: 500px) and (pointer: coarse)');
+document.documentElement.classList.toggle('touch', touch);
+document.documentElement.classList.toggle('no-volume', !volumeControl);
+document.documentElement.classList.toggle('web', isWeb);
+
 function resolvedTheme() {
   if (settings.theme === 'system') return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   return settings.theme === 'light' ? 'light' : 'dark';
@@ -158,10 +165,51 @@ function render() {
   $('radioBtn').title = radio.state.current ? `Rádio: ${radio.state.current.title}` : 'Rádio';
   members.renderButton();
   call.render();
+  syncWakeLock(tab === 'call' && !!session?.inCall && call.stage.size > 0);
 }
+
+// Com uma tela aberta na call, o celular não apaga a tela sozinho.
+let wakeLock = null;
+let wakeWanted = false;
+async function syncWakeLock(want) {
+  wakeWanted = want;
+  if (!navigator.wakeLock) return;
+  if (want && !wakeLock && document.visibilityState === 'visible') {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+      if (!wakeWanted) { wakeLock?.release().catch(() => {}); wakeLock = null; }
+    } catch {
+      wakeLock = null;
+    }
+  } else if (!want && wakeLock) {
+    const lock = wakeLock;
+    wakeLock = null;
+    lock.release().catch(() => {});
+  }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncWakeLock(wakeWanted); });
 
 function turmaName(t) {
   return t?.name || 'Nova turma';
+}
+
+// Convite que vai para a área de transferência: no app, o link telinha://; na versão web, o
+// link https, que abre no navegador do celular (e também pode ser colado no app).
+function mainInvite(code) {
+  return isWeb ? webInviteLink(code, serverInfo?.server) || inviteLink(code) : inviteLink(code);
+}
+
+// Link para quem vai assistir pelo celular (só no app, com o servidor da Telinha).
+function phoneInvite(code) {
+  if (isWeb || settings.signaling !== 'auto') return '';
+  return webInviteLink(code, serverInfo?.server);
+}
+
+async function copyInvite(code, text = mainInvite(code), done = 'Convite copiado. Mande para seus amigos.') {
+  const ok = await copyText(text);
+  dismissedInvite = code;
+  toast(ok ? done : text);
 }
 
 function renderRail() {
@@ -206,13 +254,19 @@ async function createTurma() {
   await store.saveTurma(turma);
   await refreshTurmas();
   await openTurma(code);
-  const ok = await copyText(inviteLink(code));
+  const ok = await copyText(mainInvite(code));
   dismissedInvite = code;
   toast(ok ? 'Turma criada. O convite já foi copiado.' : 'Turma criada.');
 }
 
 async function joinByCode(code) {
-  if (!ensureName()) { pendingCode = code; return; }
+  if (!ensureName()) {
+    pendingCode = code;
+    // Veio por convite: basta escrever o nome e tocar em Entrar.
+    $('joinInput').value = code;
+    $('joinForm').querySelector('button').classList.add('primary');
+    return;
+  }
   $('suggest').hidden = true;
   const isNew = !turmas.some((t) => t.code === code);
   if (isNew) {
@@ -239,7 +293,7 @@ const nostrFallback = new Set(); // turmas que, nesta execução, usam os relays
 // Decide como a turma se conecta: servidor da Telinha (com TURN) ou relays públicos.
 async function networkConfig(code) {
   if (settings.signaling === 'server') return { builtinServer: null, extraIce: await turnServers() };
-  serverInfo ??= bridge ? await bridge.appInfo().catch(() => null) : (window.__telinhaServer || null);
+  serverInfo ??= await loadServerInfo();
   const server = serverInfo?.server || '';
   return {
     builtinServer: server && !nostrFallback.has(code) ? server : null,
@@ -247,10 +301,22 @@ async function networkConfig(code) {
   };
 }
 
+// Servidor da Telinha: o do app, o simulado dos testes ou, na versão web, o próprio endereço da página.
+async function loadServerInfo() {
+  if (bridge) return bridge.appInfo().catch(() => null);
+  if (window.__telinhaServer) return window.__telinhaServer;
+  if (isWeb && /^https?:$/.test(location.protocol)) return { server: location.origin.replace(/^http/, 'ws') };
+  return null;
+}
+
 async function turnServers() {
   try {
     if (bridge?.turnServers) return (await bridge.turnServers()) || [];
-    return window.__telinhaServer?.iceServers || [];
+    if (window.__telinhaServer) return window.__telinhaServer.iceServers || [];
+    if (!isWeb) return [];
+    const res = await fetch('/turn', { headers: { 'x-telinha': APP_HEADER }, cache: 'no-store', signal: AbortSignal.timeout(6000) });
+    const data = res.ok ? await res.json() : null;
+    return Array.isArray(data?.iceServers) ? data.iceServers : [];
   } catch {
     return [];
   }
@@ -324,7 +390,7 @@ async function openTurma(code) {
   if (token !== openToken || session) return;
   let next;
   try {
-    next = new TurmaSession({ code, settings, ...network });
+    next = new TurmaSession({ code, settings, ...network, forward: canShare });
   } catch (error) {
     toast(error.message);
     openSettings();
@@ -488,13 +554,36 @@ function openTurmaMenu(turma, anchor) {
       },
     },
   }, h('input', { value: turma.name || '', maxlength: '40', 'aria-label': 'Nome da turma' }), h('button.btn.small', { type: 'submit' }, 'Salvar'));
-  menu.replaceChildren(
+  const phone = phoneInvite(turma.code);
+  // Tela estreita (celular): sem a barra lateral, as outras turmas e a entrada por convite ficam aqui.
+  const narrow = anchor === $('turmaTitle') && compactLayout.matches;
+  const others = narrow ? turmas.filter((t) => t.code !== turma.code) : [];
+  const joinForm = narrow ? h('form.join.compact', {
+    autocomplete: 'off',
+    on: {
+      submit: (e) => {
+        e.preventDefault();
+        const input = e.target.querySelector('input');
+        const code = parseRoomCode(input.value);
+        if (!code) { toast('Convite inválido.'); return; }
+        closePopover();
+        joinByCode(code);
+      },
+    },
+  }, h('input', { placeholder: 'Cole um convite', spellcheck: 'false', 'aria-label': 'Convite' }), h('button.btn.small', { type: 'submit' }, 'Entrar')) : null;
+  menu.replaceChildren(...[
     h('div.pop-title', {}, turmaName(turma)),
     h('button.menu-item', { type: 'button', on: { click: () => { renameForm.hidden = false; renameForm.querySelector('input').select(); } } }, icon('edit', 16), 'Renomear'),
     renameForm,
-    h('button.menu-item', { type: 'button', on: { click: async () => { closePopover(); const ok = await copyText(inviteLink(turma.code)); toast(ok ? 'Convite copiado.' : inviteLink(turma.code)); } } }, icon('link', 16), 'Copiar convite'),
+    h('button.menu-item', { type: 'button', on: { click: () => { closePopover(); copyInvite(turma.code, mainInvite(turma.code), 'Convite copiado.'); } } }, icon('link', 16), 'Copiar convite'),
+    phone ? h('button.menu-item', { type: 'button', on: { click: () => { closePopover(); copyInvite(turma.code, phone, 'Link para celular copiado. Ele abre no navegador, só para assistir.'); } } }, icon('link', 16), 'Copiar link para celular') : null,
     h('button.menu-item.danger', { type: 'button', on: { click: () => leaveTurma(turma) } }, icon('leave', 16), 'Sair da turma'),
-  );
+    others.length ? h('div.pop-sub', {}, 'Outras turmas') : null,
+    ...others.map((t) => h('button.menu-item', { type: 'button', on: { click: () => { closePopover(); openTurma(t.code); } } }, icon('chat', 16), turmaName(t))),
+    narrow ? h('div.pop-sub', {}, 'Nova turma') : null,
+    narrow ? h('button.menu-item', { type: 'button', on: { click: () => { closePopover(); createTurma(); } } }, icon('plus', 16), 'Criar turma') : null,
+    joinForm,
+  ].filter(Boolean));
   showPopover(menu, anchor, { place: anchor.closest('.rail') ? 'right' : 'below', align: 'start' });
 }
 
@@ -690,7 +779,11 @@ function openSettings() {
   $('setTurnUser').value = settings.turnUser;
   $('setTurnPass').value = settings.turnPass;
   $('connDetails').open = settings.signaling !== 'auto' || !!settings.turnUrl;
-  $('appField').hidden = !bridge;
+  // Na versão web só os sons valem; no celular não há transmissão nem escolha de saída.
+  $('appField').hidden = !bridge && !isWeb;
+  for (const id of ['setNotify', 'setTray', 'setAutostart']) $(id).closest('.switch').hidden = !bridge;
+  $('qualityField').hidden = !canShare;
+  $('speakerRow').hidden = !sinkControl;
   $('setNotify').checked = settings.notifications;
   $('setSounds').checked = settings.sounds;
   for (const [group, key] of Object.entries(SOUND_GROUPS)) $(`setSounds-${group}`).checked = settings[key] !== false;
@@ -748,10 +841,12 @@ async function saveSettingsFromDialog() {
     micId: $('setMic').value,
     speakerId: $('setSpeaker').value,
     speakerLabel: $('setSpeaker').value ? $('setSpeaker').selectedOptions[0]?.dataset.label || '' : '',
-    ...(bridge ? {
-      notifications: $('setNotify').checked,
+    ...(bridge || isWeb ? {
       sounds: $('setSounds').checked,
       ...Object.fromEntries(Object.entries(SOUND_GROUPS).map(([group, key]) => [key, $(`setSounds-${group}`).checked])),
+    } : {}),
+    ...(bridge ? {
+      notifications: $('setNotify').checked,
       tray: $('setTray').checked,
       autostart: $('setAutostart').checked,
     } : {}),
@@ -853,12 +948,7 @@ function bind() {
     const btn = e.target.closest('button[data-tab]');
     if (btn) setTab(btn.dataset.tab);
   });
-  $('inviteBtn').addEventListener('click', async () => {
-    if (!current) return;
-    const ok = await copyText(inviteLink(current.code));
-    dismissedInvite = current.code;
-    toast(ok ? 'Convite copiado. Mande para seus amigos.' : inviteLink(current.code));
-  });
+  $('inviteBtn').addEventListener('click', () => { if (current) copyInvite(current.code); });
   $('reactBtn').addEventListener('click', () => reactions.open($('reactBtn')));
   $('radioBtn').addEventListener('click', () => radio.open($('radioBtn')));
   $('qualityBtn').addEventListener('click', openQualityPop);
@@ -936,8 +1026,25 @@ async function migrate() {
   }
 }
 
+// No celular, a área da Telinha acompanha o teclado (senão ele cobre a caixa de mensagem).
+function trackViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const update = () => {
+    document.documentElement.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
+    if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', update);
+  vv.addEventListener('scroll', update);
+  update();
+}
+
 async function start() {
   renderIcons();
+  trackViewport();
+  // Sem captura de tela (celular) não há Compartilhar; o rádio só toca no app do Windows.
+  for (const id of ['shareBtn', 'qualityBtn']) $(id).classList.toggle('unsupported', !canShare);
+  $('radioBtn').classList.toggle('unsupported', isWeb);
   applyTheme();
   bind();
   if (settings.speakerId) setSpeaker(settings.speakerId, settings.speakerLabel);
@@ -955,6 +1062,8 @@ async function start() {
 
   const link = bridge ? await bridge.pendingLink() : new URLSearchParams(location.search).get('sala');
   const code = link ? parseRoomCode(link) : null;
+  // Na versão web o convite sai do endereço: a turma já fica salva no aparelho.
+  if (isWeb && link) history.replaceState(null, '', location.pathname);
   if (code) await joinByCode(code);
   else if (settings.name && turmas.length) await openTurma(turmas.find((t) => t.code === settings.lastTurma)?.code || turmas[0].code);
   else render();

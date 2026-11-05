@@ -5,6 +5,8 @@
 //   mensagens curtas para os PCs se encontrarem; voz e vídeo nunca passam aqui.
 // - GET /turn: credenciais temporárias do TURN do Cloudflare, usado quando duas
 //   redes não conseguem se conectar direto. As chaves ficam só no servidor.
+// - Qualquer outro endereço: a versão web da Telinha (pasta publico/, montada por
+//   ferramentas/montar-web.mjs), para assistir pelo celular. O convite é /?sala=<código>.
 import { DurableObject } from 'cloudflare:workers';
 
 const MAX_MESSAGE = 64 * 1024;
@@ -22,6 +24,10 @@ export default {
       return relay.fetch(request);
     }
     if (url.pathname === '/turn') return turn(request, env);
+    if (env.ASSETS) {
+      const res = await env.ASSETS.fetch(request);
+      if (res.status !== 404) return res;
+    }
     return new Response('Servidor da Telinha em funcionamento.\n', {
       headers: { 'content-type': 'text/plain; charset=utf-8' },
     });

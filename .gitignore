@@ -8,3 +8,4 @@ instalador-log.txt
 publicar-log.txt
 servidor-log.txt
 .wrangler/
+servidor-cloudflare/publico/

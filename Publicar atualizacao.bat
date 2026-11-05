@@ -49,6 +49,9 @@ node ferramentas\corrigir-release.mjs >> "%LOG%" 2>&1
 set "GH_TOKEN="
 
 call "%~dp0ferramentas\separar-instalador.bat" >nul 2>&1
+rem Versao web (celular) com o mesmo codigo do app. Se falhar, o app continua publicado.
+echo [web] >> "%LOG%"
+call "%~dp0Publicar versao web.bat" /semPausa >> "%LOG%" 2>&1 || echo  A versao web nao foi publicada. Rode "Publicar versao web.bat".
 echo  Versao %VERSAO% publicada.
 echo [%date% %time%] Publicado >> "%LOG%"
 start "" "%~dp0release\Telinha-Instalador.exe"
