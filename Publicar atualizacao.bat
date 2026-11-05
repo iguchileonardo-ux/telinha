@@ -24,6 +24,10 @@ echo.
 echo  Publicando a versao %VERSAO%. Isso leva alguns minutos.
 echo [%date% %time%] Publicando %VERSAO% > "%LOG%"
 
+rem Uma versao ja publicada nao e substituida: o electron-builder pula o envio sem dar erro.
+gh release view "v%VERSAO%" --json assets -q ".assets[].name" 2>nul | findstr /i "latest.yml" >nul
+if not errorlevel 1 goto ja_publicada
+
 rem Codigo no GitHub e marca da versao (a Release precisa dela).
 echo [git] >> "%LOG%"
 git add -A >> "%LOG%" 2>&1
@@ -57,6 +61,15 @@ echo [%date% %time%] Publicado >> "%LOG%"
 start "" "%~dp0release\Telinha-Instalador.exe"
 if /i not "%~1"=="/semPausa" pause
 exit /b 0
+
+:ja_publicada
+set "GH_TOKEN="
+echo.
+echo  A versao %VERSAO% ja foi publicada antes, entao nada foi enviado.
+echo  Aumente "version" no package.json (por exemplo, o ultimo numero) e rode de novo.
+echo [%date% %time%] Versao %VERSAO% ja publicada; nada enviado >> "%LOG%"
+if /i not "%~1"=="/semPausa" pause
+exit /b 1
 
 :sem_github
 echo.

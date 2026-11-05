@@ -110,7 +110,8 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil, monta
 
 ## Situação em 05/11/2026
 
-- **Versão web para assistir pelo celular** escrita no PC, dentro da 2.4.0 (ainda não publicada, package.json continua em 2.4.0). Ver "Versão web (celular)". Para publicar: `Publicar atualizacao.bat` (app e web) ou só `Publicar versao web.bat`.
+- **Versão web para assistir pelo celular** escrita no PC. Ver "Versão web (celular)".
+- Primeira tentativa de publicar (05/11, 19:00): a Release v2.4.0 **já existia desde 20/10/2026** com instalador e `latest.yml`, então o electron-builder pulou o envio sem erro ("existing release published more than 2 hours ago") e nada novo saiu para os amigos; a tag v2.4.0 foi movida para o commit novo. A versão web parou no passo 2 (sem login no Cloudflare quando chamada pelo `Publicar atualizacao.bat`). Correções: package.json em **2.4.1**; `Publicar atualizacao.bat` agora para antes do git se a Release da versão já tem `latest.yml` (`ja_publicada`); `Publicar versao web.bat` diz o motivo da falha. Próximo passo: rodar `Publicar versao web.bat` (faz o login) e depois `Publicar atualizacao.bat` (2.4.1).
 - Testado com Playwright (Chromium, `wrangler dev`): PC transmitindo pela web e pelo app com ponte simulada, iPhone e Android emulados entram pelo link, recebem a tela (1920x1080), chat nos dois sentidos, controles por toque, tela cheia no Android, menu da turma no celular, configurações do celular, sem rolagem lateral, convite `telinha://` no app e link para celular no menu; com o transmissor forçado ao limite, os dois celulares passaram a receber pelo PC2 em cerca de 30 s e nenhum celular repassou. **Não testado em celulares de verdade nem no Safari real** (o ambiente de testes só tem Chromium): conferir no iPhone a tela cheia, o som da tela recebida e a volta depois de bloquear a tela.
 
 ## Situação em 27/10/2026

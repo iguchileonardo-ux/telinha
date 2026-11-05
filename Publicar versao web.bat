@@ -19,11 +19,12 @@ call node ferramentas\montar-web.mjs || goto erro
 echo.
 echo  === 2/3  Preparando o servidor ===
 pushd servidor-cloudflare
-call npm install --no-audit --no-fund >nul 2>&1 || goto erro_pop
+call npm install --no-audit --no-fund >nul 2>&1
+if errorlevel 1 (echo  Nao foi possivel instalar as ferramentas do Cloudflare. Confira a internet.& goto erro_pop)
 call npx wrangler whoami >nul 2>&1
 if errorlevel 1 (
   rem Chamado pelo "Publicar atualizacao.bat": sem login, nao fica esperando o navegador.
-  if /i "%~1"=="/semPausa" goto erro_pop
+  if /i "%~1"=="/semPausa" (echo  Sem login no Cloudflare. Rode "Publicar versao web.bat" para entrar e publicar.& goto erro_pop)
   call npx wrangler login || goto erro_pop
 )
 
