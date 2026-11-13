@@ -102,6 +102,7 @@
 
         <nav class="dock" id="dock" aria-label="Controles da call" hidden>
           <button class="icon-btn" id="micBtn" type="button"></button>
+          <button class="icon-btn" id="camBtn" type="button"></button>
           <button class="btn primary" id="shareBtn" type="button"></button>
           <button class="icon-btn" id="qualityBtn" type="button" title="Qualidade da transmissão" aria-label="Qualidade da transmissão" hidden><i data-icon="gauge"></i></button>
           <button class="icon-btn" id="reactBtn" type="button" title="Reações" aria-label="Reações"><i data-icon="smile"></i></button>
@@ -226,6 +227,14 @@
       <div class="device-row" id="speakerRow">
         <i data-icon="volume" data-size="16"></i>
         <select id="setSpeaker" aria-label="Saída de áudio"></select>
+      </div>
+    </div>
+
+    <div class="field" id="camField">
+      <span>Câmera</span>
+      <div class="device-row">
+        <i data-icon="video" data-size="16"></i>
+        <select id="setCam" aria-label="Câmera"></select>
       </div>
     </div>
 

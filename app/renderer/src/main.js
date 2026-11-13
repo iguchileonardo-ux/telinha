@@ -85,6 +85,7 @@ const app = {
   speaking: () => call.speaking.size > 0,
   onSpeakingChange: () => scheduleRender(),
   toggleShare: () => toggleShare(),
+  toggleCamera: () => toggleCamera(),
   send: (text) => { alerts.sound('sent'); return session?.sendMessage(text); },
   pin: (msg) => session?.setMeta({ pinned: { id: msg.id, text: msg.text, name: msg.name } }),
   unpin: () => session?.setMeta({ pinned: null }),
@@ -457,6 +458,7 @@ function wireSession(s) {
     scheduleRender();
   }));
   s.addEventListener('notice', mine((d) => { alerts.sound('notice'); toast(d.text, 5000); }));
+  s.addEventListener('camera', mine(() => scheduleRender()));
   s.addEventListener('share', mine((d) => {
     alerts.sound(d.sharing ? 'selfShareStart' : 'selfShareStop');
     if (!d.sharing) endShareExtras();
@@ -612,6 +614,28 @@ function endShareExtras() {
   call.clearShareInfo();
 }
 
+// ---------- câmera ----------
+
+let cameraStarting = false;
+async function toggleCamera() {
+  if (!session || cameraStarting) return;
+  if (session.camera) { session.stopCamera(); return; }
+  cameraStarting = true;
+  try {
+    await session.startCamera();
+  } catch (error) {
+    const name = error?.name;
+    toast(name === 'NotAllowedError' ? 'O acesso à câmera foi bloqueado. Libere a câmera nas configurações de privacidade do Windows.'
+      : name === 'NotFoundError' || name === 'OverconstrainedError' ? 'Nenhuma câmera encontrada.'
+        : name === 'NotReadableError' ? 'A câmera está sendo usada por outro programa.'
+          : 'Não foi possível ligar a câmera.', 5000);
+    console.warn('Câmera indisponível:', error);
+  } finally {
+    cameraStarting = false;
+    scheduleRender();
+  }
+}
+
 async function toggleShare() {
   if (!session || starting) return;
   if (session.sharing) { session.stopShare(); return; }
@@ -731,8 +755,9 @@ function fillSelect(select, list, value) {
 }
 
 async function fillDevices(keepSelection = false) {
-  const { inputs, outputs } = await listDevices();
+  const { inputs, outputs, cameras } = await listDevices();
   fillSelect($('setMic'), inputs, keepSelection ? $('setMic').value : settings.micId);
+  fillSelect($('setCam'), cameras, keepSelection ? $('setCam').value : settings.camId);
   fillSelect($('setSpeaker'), outputs, keepSelection ? $('setSpeaker').value : settings.speakerId);
 }
 
@@ -784,6 +809,7 @@ function openSettings() {
   for (const id of ['setNotify', 'setTray', 'setAutostart']) $(id).closest('.switch').hidden = !bridge;
   $('qualityField').hidden = !canShare;
   $('speakerRow').hidden = !sinkControl;
+  $('camField').hidden = !canShare;
   $('setNotify').checked = settings.notifications;
   $('setSounds').checked = settings.sounds;
   for (const [group, key] of Object.entries(SOUND_GROUPS)) $(`setSounds-${group}`).checked = settings[key] !== false;
@@ -839,6 +865,7 @@ async function saveSettingsFromDialog() {
     turnUser: $('setTurnUser').value.trim(),
     turnPass: $('setTurnPass').value,
     micId: $('setMic').value,
+    camId: $('setCam').value,
     speakerId: $('setSpeaker').value,
     speakerLabel: $('setSpeaker').value ? $('setSpeaker').selectedOptions[0]?.dataset.label || '' : '',
     ...(bridge || isWeb ? {
@@ -865,6 +892,7 @@ async function saveSettingsFromDialog() {
   const connectionChanged = ['signaling', 'serverUrl', 'turnUrl', 'turnUser', 'turnPass'].some((k) => next[k] !== settings[k]);
   const nameChanged = next.name !== settings.name;
   const micChanged = next.micId !== settings.micId;
+  const camChanged = (next.camId || '') !== (settings.camId || '');
   const speakerChanged = next.speakerId !== settings.speakerId;
   settings = next;
   saveSettings(settings);
@@ -877,6 +905,7 @@ async function saveSettingsFromDialog() {
     if (nameChanged) session.updateProfile({ name: settings.name });
     session.setQuality(settings);
     if (micChanged) session.setMicDevice(settings.micId);
+    if (camChanged) session.setCameraDevice(settings.camId);
   }
   if (speakerChanged) setSpeaker(settings.speakerId, settings.speakerLabel);
   toast(connectionChanged && session ? 'As mudanças de conexão valem a partir da próxima vez que você abrir a turma.' : 'Configurações salvas.', connectionChanged ? 4500 : 2500);

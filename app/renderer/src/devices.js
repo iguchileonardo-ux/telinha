@@ -1,4 +1,4 @@
-// Escolha de microfone e de saída de áudio.
+// Escolha de microfone, câmera e saída de áudio.
 const bridge = window.telinha ?? null;
 
 let speaker = { id: '', label: '' };
@@ -16,9 +16,9 @@ export async function listDevices() {
     const pick = (kind) => all
       .filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
       .map((d) => ({ id: d.deviceId, label: d.label, name: cleanName(d.label) }));
-    return { inputs: pick('audioinput'), outputs: pick('audiooutput') };
+    return { inputs: pick('audioinput'), outputs: pick('audiooutput'), cameras: pick('videoinput') };
   } catch {
-    return { inputs: [], outputs: [] };
+    return { inputs: [], outputs: [], cameras: [] };
   }
 }
 
@@ -26,6 +26,12 @@ export async function listDevices() {
 export function micConstraints(micId) {
   const base = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   return micId ? { ...base, deviceId: { exact: micId } } : base;
+}
+
+// Restrições da câmera escolhida ('' = padrão do sistema): até 720p a 30 qps.
+export function camConstraints(camId) {
+  const base = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } };
+  return camId ? { ...base, deviceId: { exact: camId } } : base;
 }
 
 // Saída em uso: a escolhida, ou a padrão enquanto ela estiver desconectada.

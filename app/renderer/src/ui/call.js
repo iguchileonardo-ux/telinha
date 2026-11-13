@@ -6,7 +6,7 @@ import { hexColorFor } from '../annotate.js';
 import { canShare, isWeb, touch } from '../platform.js';
 
 export class CallView {
-  // app: { session(), settings(), saveVolume, toggleShare(), onSpeakingChange() }
+  // app: { session(), settings(), saveVolume, toggleShare(), toggleCamera(), onSpeakingChange() }
   constructor(app) {
     this.app = app;
     this.sinks = new Map(); // streamId -> { audio, stop, uid }
@@ -14,6 +14,8 @@ export class CallView {
     this.drawPending = new Set(); // peerIds a quem pedi para desenhar
     this.requests = new Map(); // peerId -> { name }
     this.myColor = hexColorFor(app.settings().userId);
+    this.camOpen = new Set(); // peerIds com a câmera aberta grande no palco
+    this.camVideos = new Map(); // uid -> { el, video, id } da câmera na fileira de pessoas (reaproveitado)
 
     this.stage = new Stage($('stage'), {
       myColor: this.myColor,
@@ -30,10 +32,15 @@ export class CallView {
         if (!session?.requestRelay(peerId, on)) return;
         toast(on ? 'Pedido enviado. A tela será retransmitida para a turma.' : 'Retransmissão encerrada.');
       },
+      onClose: (id) => {
+        this.camOpen.delete(id.replace(/^cam:/, ''));
+        this.render();
+      },
       onCopy: async (_peerId, dataUrl) => {
         toast(await copyImage(dataUrl) ? 'Imagem copiada.' : 'Não foi possível copiar a imagem.');
       },
       onVolume: (peerId, v) => {
+        if (peerId.startsWith('cam:')) return;
         const peer = this.app.session()?.peers.get(peerId);
         if (peer?.uid) this.app.saveVolume(`${peer.uid}:tela`, v);
       },
@@ -43,6 +50,7 @@ export class CallView {
     $('leaveCallBtn').addEventListener('click', () => this.app.session()?.leaveCall());
     $('micBtn').addEventListener('click', () => this.toggleMute());
     $('shareBtn').addEventListener('click', () => this.app.toggleShare());
+    $('camBtn').addEventListener('click', () => this.app.toggleCamera());
   }
 
   toggleMute() {
@@ -66,6 +74,9 @@ export class CallView {
   detach() {
     this.#stopMuteWatch();
     this.stage.clear();
+    this.camOpen.clear();
+    for (const bubble of this.camVideos.values()) bubble.video.srcObject = null;
+    this.camVideos.clear();
     for (const sink of this.sinks.values()) this.#dropSink(sink);
     this.sinks.clear();
     this.stopSelfMeter?.();
@@ -92,14 +103,22 @@ export class CallView {
       const peer = session.peers.get(id);
       if (!peer?.sharing || session.canDrawOn(peer)) this.drawPending.delete(id);
     }
-    this.stage.sync(screens.map((p) => ({
-      id: p.id,
-      name: p.name,
-      stream: session.shareOf(p),
-      volume: settings.volumes?.[`${p.uid}:tela`] ?? 1,
-      draw: session.canDrawOn(p) ? 'allowed' : this.drawPending.has(p.id) ? 'pending' : 'none',
-      relay: session.relayMode(p) === 'on' || inCall.some((q) => q.id !== p.id && !q.via) ? session.relayMode(p) : null,
-    })));
+    // Câmeras abertas grandes no palco (clique no vídeo da pessoa na fileira de baixo).
+    const cams = session.inCall ? inCall.filter((p) => session.camOf(p)) : [];
+    for (const id of [...this.camOpen]) if (!cams.some((p) => p.id === id)) this.camOpen.delete(id);
+    const openCams = cams.filter((p) => this.camOpen.has(p.id));
+    this.stage.sync([
+      ...screens.map((p) => ({
+        id: p.id,
+        name: p.name,
+        stream: session.shareOf(p),
+        volume: settings.volumes?.[`${p.uid}:tela`] ?? 1,
+        draw: session.canDrawOn(p) ? 'allowed' : this.drawPending.has(p.id) ? 'pending' : 'none',
+        relay: session.relayMode(p) === 'on' || inCall.some((q) => q.id !== p.id && !q.via) ? session.relayMode(p) : null,
+      })),
+      ...openCams.map((p) => ({ id: `cam:${p.id}`, kind: 'cam', name: p.name, stream: session.camOf(p) })),
+    ]);
+    const staged = screens.length + openCams.length;
 
     this.#syncAudio(session, inCall, settings);
 
@@ -121,16 +140,20 @@ export class CallView {
     // Pessoas na call
     const people = $('people');
     people.hidden = !session.inCall;
-    people.classList.toggle('compact', screens.length > 0);
+    people.classList.toggle('compact', staged > 0);
+    const camUids = new Set();
     if (session.inCall) {
-      const me = { uid: settings.userId, name: settings.name || 'Você', hash: session.avatarHash, muted: session.muted, sharing: session.sharing, me: true };
-      const everyone = [me, ...inCall.map((p) => ({ uid: p.uid, name: p.name, hash: p.avatar, muted: p.muted, sharing: !!p.sharing, net: p.net }))];
+      const me = { uid: settings.userId, name: settings.name || 'Você', hash: session.avatarHash, muted: session.muted, sharing: session.sharing, me: true, cam: session.camStream };
+      const everyone = [me, ...inCall.map((p) => ({ uid: p.uid, id: p.id, name: p.name, hash: p.avatar, muted: p.muted, sharing: !!p.sharing, net: p.net, cam: session.camOf(p) }))];
       const size = people.classList.contains('compact') ? 30 : 76;
       people.replaceChildren(...everyone.map((m) => h(`div.person${this.speaking.has(m.uid) ? '.speaking' : ''}`, { title: personTitle(m) },
-        avatar(m, size),
+        m.cam ? this.#camBubble(m, size, camUids) : avatar(m, size),
         h('span.person-name', {}, m.me ? 'Você' : m.name),
         netBadge(m.net),
         m.muted ? h('span.person-muted', { title: 'Sem microfone' }, icon('micOff', 13)) : null)));
+    }
+    for (const [uid, bubble] of this.camVideos) {
+      if (!camUids.has(uid)) { bubble.video.srcObject = null; this.camVideos.delete(uid); }
     }
 
     // Só-som (música de alguém)
@@ -152,6 +175,12 @@ export class CallView {
     const share = $('shareBtn');
     share.replaceChildren(icon(session.sharing ? 'stop' : 'monitor', 17), session.sharing ? 'Parar' : 'Compartilhar');
     share.classList.toggle('stop', session.sharing);
+    const cam = $('camBtn');
+    cam.hidden = !canShare;
+    cam.replaceChildren(icon(session.camera ? 'video' : 'videoOff'));
+    cam.classList.toggle('on', session.camera);
+    cam.title = session.camera ? 'Desligar câmera' : 'Ligar câmera';
+    cam.setAttribute('aria-label', cam.title);
     const quality = $('qualityBtn');
     quality.hidden = session.share?.kind !== 'screen';
     if (quality.hidden && !$('qualityPop').hidden) closePopover();
@@ -160,7 +189,7 @@ export class CallView {
     // fora das telas, para não cobrir o volume e o ponteiro de quem eu estou assistindo.
     const preview = $('selfPreview');
     const local = session.share?.kind === 'screen' ? session.localStream : null;
-    const compact = screens.length > 0 && !!local;
+    const compact = staged > 0 && !!local;
     preview.hidden = !session.sharing;
     preview.classList.toggle('compact', compact);
     preview.title = compact ? $('selfLabel').textContent : '';
@@ -175,6 +204,37 @@ export class CallView {
 
     this.#renderRequests();
     this.#muteWatch(session);
+  }
+
+  // Vídeo da câmera no lugar da foto. A bolha é reaproveitada entre renderizações: o vídeo não
+  // pisca e um clique não se perde se a fileira for redesenhada no meio dele.
+  // A própria câmera aparece espelhada; a dos outros abre grande no palco com um clique.
+  #camBubble(m, size, camUids) {
+    camUids.add(m.uid);
+    let bubble = this.camVideos.get(m.uid);
+    if (!bubble) {
+      const video = h('video', { autoplay: true, playsInline: true });
+      video.muted = true;
+      const el = h('span.avatar.cam', {}, video);
+      el.addEventListener('click', () => {
+        if (!bubble.id) return;
+        if (this.camOpen.has(bubble.id)) this.camOpen.delete(bubble.id);
+        else this.camOpen.add(bubble.id);
+        this.render();
+      });
+      bubble = { el, video, id: null };
+      this.camVideos.set(m.uid, bubble);
+    }
+    const { el, video } = bubble;
+    bubble.id = m.me ? null : m.id;
+    if (video.srcObject !== m.cam) video.srcObject = m.cam;
+    if (video.paused) video.play().catch(() => {});
+    el.classList.toggle('mirror', !!m.me);
+    el.classList.toggle('open', !m.me && this.camOpen.has(m.id));
+    el.title = m.me ? 'Sua câmera' : this.camOpen.has(m.id) ? `Fechar a câmera de ${m.name}` : `Abrir a câmera de ${m.name}`;
+    el.style.width = `${size}px`;
+    el.style.height = `${size}px`;
+    return el;
   }
 
   // Avisa quando a pessoa fala com o microfone desligado.

@@ -701,6 +701,14 @@ html.no-volume input[type="range"].volume { display: none; }
 .people.compact .person-muted svg { width: 10px; height: 10px; }
 .people.compact .person.speaking .avatar { box-shadow: 0 0 0 2px var(--ok); }
 
+/* Câmera no lugar da foto. A dos outros abre grande no palco com um clique. */
+.avatar.cam { background: var(--video-bg); pointer-events: auto; cursor: pointer; }
+.avatar.cam.mirror { cursor: default; }
+.avatar.cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar.cam.mirror video { transform: scaleX(-1); }
+.avatar.cam.open { outline: 2px solid var(--accent); outline-offset: 3px; }
+#camBtn.on { color: var(--accent); }
+
 .lobby {
   position: absolute;
   inset: 0;

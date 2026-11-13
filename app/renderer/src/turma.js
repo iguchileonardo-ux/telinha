@@ -15,7 +15,7 @@ import {
   getRelaySockets as relaySockets,
 } from '@trystero-p2p/ws-relay';
 import { iceServers } from './settings.js';
-import { micConstraints } from './devices.js';
+import { micConstraints, camConstraints } from './devices.js';
 import { validImage, hashData } from './images.js';
 import * as store from './store.js';
 
@@ -146,6 +146,12 @@ export function overloaded(records, min = 2) {
 // Taxa de bits de cada envio de vídeo conforme o número de pessoas recebendo direto de mim:
 // com mais gente, cada cópia usa menos internet em vez de todas disputarem a mesma banda.
 const FANOUT_MIN_BITRATE = 1_500_000;
+// Câmera (captura em camConstraints, devices.js): taxa máxima por pessoa conforme o número de envios diretos,
+// menor enquanto eu transmito a tela (a tela tem prioridade na internet de quem envia).
+const camBitrate = (sends, sharing) => {
+  const base = sends <= 2 ? 1_200_000 : sends <= 4 ? 800_000 : 500_000;
+  return sharing ? Math.min(base, 500_000) : base;
+};
 export function fanoutScale(count) {
   if (count <= 2) return 1;
   if (count === 3) return 0.8;
@@ -202,6 +208,8 @@ export class TurmaSession extends EventTarget {
     this.muted = false;
     this.micStream = null;
     this.micId = settings.micId || '';
+    this.camStream = null; // câmera ligada (só vídeo)
+    this.camId = settings.camId || '';
     this.share = null; // { stream, kind: 'screen' | 'audio', q: { fps, res }, label, audio }
     this.drawAllow = new Set();
     this.quality = normalizeQuality(settings);
@@ -338,6 +346,7 @@ export class TurmaSession extends EventTarget {
   leaveCall() {
     if (!this.inCall) return;
     this.stopShare();
+    this.stopCamera();
     this.inCall = false;
     if (this.micStream) {
       this.#retireStream(this.micStream);
@@ -456,6 +465,7 @@ export class TurmaSession extends EventTarget {
     this.#resetRoutes();
     this.#retireStream(current.stream);
     current.stream.getTracks().forEach((t) => t.stop());
+    if (this.camStream) this.#applyCamera(); // sem a tela, a câmera volta à taxa normal
     this.#broadcastHello();
     this.#emit('share', { sharing: false });
   }
@@ -478,6 +488,60 @@ export class TurmaSession extends EventTarget {
     return peer.sharing.manualBy === this.selfId ? 'on' : 'off';
   }
 
+  // ---- câmera ----
+
+  get camera() {
+    return !!this.camStream;
+  }
+
+  // Liga a câmera (entra na call se preciso). Lança o erro do getUserMedia se não conseguir.
+  async startCamera() {
+    if (this.closed || this.camStream) return;
+    if (!this.inCall) await this.joinCall({ withMic: false });
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: camConstraints(this.camId), audio: false });
+    } catch (error) {
+      if (!this.camId || error?.name === 'NotAllowedError') throw error;
+      // Câmera escolhida desconectada: usa a padrão do sistema.
+      stream = await navigator.mediaDevices.getUserMedia({ video: camConstraints(''), audio: false });
+      this.#emit('notice', { text: 'A câmera escolhida não foi encontrada. Usando a padrão do sistema.' });
+    }
+    if (this.closed || !this.inCall || this.camStream) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const track = stream.getVideoTracks()[0];
+    if (track) track.contentHint = 'motion';
+    track?.addEventListener('ended', () => {
+      if (this.camStream !== stream) return;
+      this.stopCamera();
+      this.#emit('notice', { text: 'A câmera foi desconectada.' });
+    });
+    this.camStream = stream;
+    const st = track?.getSettings?.() || {};
+    this.#log(`Câmera ligada: ${st.width || '?'}x${st.height || '?'} a ${Math.round(st.frameRate || 0) || '?'} qps.`);
+    this.#syncStreams();
+    this.#broadcastHello();
+    this.#emit('camera', { on: true });
+  }
+
+  stopCamera() {
+    const stream = this.camStream;
+    if (!stream) return;
+    this.camStream = null;
+    this.#retireStream(stream);
+    stream.getTracks().forEach((t) => t.stop());
+    this.#log('Câmera desligada.');
+    this.#broadcastHello();
+    this.#emit('camera', { on: false });
+  }
+
+  // Troca a câmera sem desligar (se estiver ligada).
+  async setCameraDevice(camId) {
+    this.camId = camId || '';
+    if (!this.camStream) return;
+    this.stopCamera();
+    try { await this.startCamera(); } catch { this.#emit('notice', { text: 'Não foi possível usar a câmera escolhida.' }); }
+  }
+
   // ---- streams recebidas ----
 
   shareOf(peer) {
@@ -495,6 +559,12 @@ export class TurmaSession extends EventTarget {
   micOf(peer) {
     if (!peer?.inCall || !peer.micStreamId) return null;
     return peer.streams.get(peer.micStreamId) || null;
+  }
+
+  camOf(peer) {
+    if (!peer?.inCall || !peer.camStreamId) return null;
+    const stream = peer.streams.get(peer.camStreamId);
+    return stream?.getVideoTracks().length ? stream : null;
   }
 
   // ---- chat ----
@@ -602,9 +672,10 @@ export class TurmaSession extends EventTarget {
     await Promise.race([this.actions.bye.send({}).catch(() => {}), new Promise((r) => setTimeout(r, 300))]);
     navigator.mediaDevices?.removeEventListener?.('devicechange', this.onDeviceChange);
     this.#saveUplink(true);
-    for (const stream of [this.share?.stream, this.micStream]) stream?.getTracks().forEach((t) => t.stop());
+    for (const stream of [this.share?.stream, this.micStream, this.camStream]) stream?.getTracks().forEach((t) => t.stop());
     this.share = null;
     this.micStream = null;
+    this.camStream = null;
     this.peers.clear();
     try { await this.room.leave(); } catch { /* ignorado */ }
   }
@@ -650,6 +721,7 @@ export class TurmaSession extends EventTarget {
       inCall: this.inCall,
       muted: this.muted || !this.micStream,
       micStreamId: this.micStream?.id ?? null,
+      camStreamId: this.camStream?.id ?? null,
       sharing: this.share
         ? {
           streamId: this.share.stream.id,
@@ -667,6 +739,7 @@ export class TurmaSession extends EventTarget {
         : null,
       tree: 1, // sabe repassar e receber telas por um repassador
       man: 1, // aceita o pedido de retransmissão manual (feed com role 'ask')
+      cam: 1, // mostra a câmera dos outros (versões antigas não recebem a câmera)
       ...(this.noForward ? { fwd: 0 } : {}), // celular: não repassa telas nem serve de ponte
       up: this.uplink || undefined,
       drawAllow: [...this.drawAllow],
@@ -829,8 +902,8 @@ export class TurmaSession extends EventTarget {
         if (now - this.pairSince.get(key) < BRIDGE_DELAY_MS || !a.inCall || !b.inCall) continue;
         const common = directs.filter((q) => q !== a && q !== b && !q.noForward && q.links.includes(a.id) && q.links.includes(b.id));
         if (common.some((q) => q.uid < this.uid)) continue;
-        for (const [stream, kind] of [[this.micOf(a), 'mic'], [this.shareOf(a), a.sharing?.kind]]) {
-          if (stream) wanted.set(`${stream.id}>${b.id}`, { stream, target: b.id, kind, from: a.id });
+        for (const [stream, kind] of [[this.micOf(a), 'mic'], [this.shareOf(a), a.sharing?.kind], [this.camOf(a), 'cam']]) {
+          if (stream && (kind !== 'cam' || b.canCam)) wanted.set(`${stream.id}>${b.id}`, { stream, target: b.id, kind, from: a.id });
         }
       }
     }
@@ -858,7 +931,7 @@ export class TurmaSession extends EventTarget {
     if (!peer) {
       peer = {
         id: peerId, uid: null, name: null, avatar: '', inCall: false, muted: true,
-        micStreamId: null, sharing: null, drawAllow: [], streams: new Map(), joinedAt: Date.now(),
+        micStreamId: null, camStreamId: null, sharing: null, drawAllow: [], streams: new Map(), joinedAt: Date.now(),
       };
       this.peers.set(peerId, peer);
     }
@@ -996,9 +1069,11 @@ export class TurmaSession extends EventTarget {
     peer.inCall = data.inCall === true || (data.p === undefined && data.sharing === true);
     peer.muted = data.muted !== false;
     peer.micStreamId = typeof data.micStreamId === 'string' ? data.micStreamId : null;
+    peer.camStreamId = typeof data.camStreamId === 'string' ? data.camStreamId.slice(0, 64) : null;
     peer.drawAllow = Array.isArray(data.drawAllow) ? data.drawAllow.filter((x) => typeof x === 'string').slice(0, 32) : [];
     peer.canRelay = data.tree === 1;
     peer.canAsk = data.man === 1;
+    peer.canCam = data.cam === 1;
     peer.noForward = data.fwd === 0;
     peer.up = Math.max(0, Math.min(1_000_000, Number(data.up) || 0));
     peer.lat = parseLat(data.lat);
@@ -1028,7 +1103,7 @@ export class TurmaSession extends EventTarget {
     }
     // Remove streams antigas que não estão mais em uso
     for (const id of [...peer.streams.keys()]) {
-      if (id !== peer.sharing?.streamId && id !== peer.micStreamId && peer.streams.get(id).getTracks().every((t) => t.readyState === 'ended')) {
+      if (id !== peer.sharing?.streamId && id !== peer.micStreamId && id !== peer.camStreamId && peer.streams.get(id).getTracks().every((t) => t.readyState === 'ended')) {
         peer.streams.delete(id);
       }
     }
@@ -1195,6 +1270,7 @@ export class TurmaSession extends EventTarget {
     if (this.closed) return;
     const locals = [];
     if (this.inCall && this.micStream) locals.push([this.micStream, 'mic']);
+    if (this.inCall && this.camStream) locals.push([this.camStream, 'cam']);
     if (this.inCall && this.share) locals.push([this.share.stream, this.share.kind]);
     const activeIds = new Set(locals.map(([s]) => s.id));
     for (const [streamId, set] of this.sent) {
@@ -1208,7 +1284,7 @@ export class TurmaSession extends EventTarget {
         // pausa (ver #applyQuality). Remover e reenviar renegocia a conexão e a estimativa de
         // banda recomeça muito baixa, deixando a imagem a poucos quadros por segundo.
         const isShare = stream === this.share?.stream;
-        const should = !peer.via && (peer.inCall || (isShare && set.has(peer.id)));
+        const should = !peer.via && (peer.inCall || (isShare && set.has(peer.id))) && (kind !== 'cam' || peer.canCam);
         if (should && !set.has(peer.id)) {
           this.#addStreamTo(stream, peer.id, { kind });
           set.add(peer.id);
@@ -1221,6 +1297,33 @@ export class TurmaSession extends EventTarget {
     this.#syncForwards();
     this.#syncRelaying();
     if (this.share) setTimeout(() => this.#applyQuality(), 400);
+    if (this.camStream) setTimeout(() => this.#applyCamera(), 400);
+  }
+
+  // Taxa e quadros do envio da câmera. Prioridade baixa: a tela e a voz vêm antes.
+  #applyCamera() {
+    const video = this.camStream?.getVideoTracks()[0];
+    if (!video) return;
+    const set = this.sent.get(this.camStream.id);
+    const bitrate = camBitrate(set?.size || 0, this.share?.kind === 'screen');
+    for (const pc of Object.values(this.#connections())) {
+      for (const sender of pc.getSenders?.() || []) {
+        if (sender.track !== video) continue;
+        const params = sender.getParameters();
+        const encoding = params.encodings?.[0];
+        if (!encoding || (encoding.maxBitrate === bitrate && encoding.maxFramerate === 30)) continue;
+        encoding.maxBitrate = bitrate;
+        encoding.maxFramerate = 30;
+        encoding.priority = 'low';
+        encoding.networkPriority = 'low';
+        params.degradationPreference = 'balanced';
+        sender.setParameters(params).catch(() => {
+          delete params.degradationPreference;
+          delete encoding.networkPriority;
+          sender.setParameters(params).catch(() => {});
+        });
+      }
+    }
   }
 
   #retireStream(stream) {

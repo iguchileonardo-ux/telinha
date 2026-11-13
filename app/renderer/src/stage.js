@@ -7,7 +7,7 @@ import { touch } from './platform.js';
 const GAP = 12;
 
 export class Stage {
-  // hooks: { onPointer, onStroke, onDrawRequest, onRelay, onCopy, onVolume, myColor }
+  // hooks: { onPointer, onStroke, onDrawRequest, onRelay, onCopy, onVolume, onClose, myColor }
   constructor(root, hooks = {}) {
     this.root = root;
     this.hooks = hooks;
@@ -35,7 +35,7 @@ export class Stage {
     return this.tiles.get(id) || null;
   }
 
-  // items: [{ id, name, stream, draw: 'none' | 'pending' | 'allowed', relay: null | 'off' | 'on', volume }]
+  // items: [{ id, name, stream, kind: 'screen' | 'cam', draw: 'none' | 'pending' | 'allowed', relay: null | 'off' | 'on', volume }]
   sync(items) {
     const wanted = new Set(items.map((i) => i.id));
     for (const id of [...this.tiles.keys()]) {
@@ -107,8 +107,8 @@ export class Stage {
     this.tiles.delete(id);
   }
 
-  #create({ id, name, volume }) {
-    const tile = new Tile(id, name, volume ?? 1, {
+  #create({ id, name, volume, kind }) {
+    const tile = new Tile(id, name, volume ?? 1, kind === 'cam' ? 'cam' : 'screen', {
       onFocus: () => this.toggleFocus(id),
       ...this.hooks,
     });
@@ -119,8 +119,9 @@ export class Stage {
 }
 
 class Tile {
-  constructor(id, name, volume, hooks) {
+  constructor(id, name, volume, kind, hooks) {
     this.id = id;
+    this.kind = kind; // 'screen' ou 'cam' (câmera aberta grande: sem ponteiro, desenho e retransmissão)
     this.hooks = hooks;
     this.stream = null;
     // volume: último nível escolhido (para voltar ao tirar do mudo); silent: som desligado.
@@ -134,7 +135,7 @@ class Tile {
     this.stroke = null;
 
     const el = document.createElement('div');
-    el.className = 'tile';
+    el.className = kind === 'cam' ? 'tile cam' : 'tile';
     el.tabIndex = 0;
 
     const video = document.createElement('video');
@@ -162,7 +163,13 @@ class Tile {
       const frame = this.frame();
       if (frame) this.hooks.onCopy?.(this.id, frame);
     });
-    tools.append(pointerBtn, penBtn, relayBtn, copyBtn);
+    if (kind === 'cam') {
+      pointerBtn.hidden = true;
+      penBtn.hidden = true;
+      tools.append(copyBtn, this.#button('close', 'Fechar', () => this.hooks.onClose?.(this.id)));
+    } else {
+      tools.append(pointerBtn, penBtn, relayBtn, copyBtn);
+    }
 
     const controls = document.createElement('div');
     controls.className = 'tile-controls';
@@ -311,6 +318,7 @@ class Tile {
 
   // Retransmissão da tela para a turma por quem assiste: null (indisponível), 'off' ou 'on'.
   setRelay(mode) {
+    if (this.kind === 'cam') mode = null;
     this.relay = mode;
     this.relayBtn.hidden = !mode;
     this.relayBtn.classList.toggle('active', mode === 'on');
@@ -374,8 +382,8 @@ class Tile {
   }
 
   setName(name) {
-    this.label.textContent = name || 'Conectando';
-    this.el.setAttribute('aria-label', `Tela de ${name || 'participante'}`);
+    this.label.textContent = this.kind === 'cam' ? `${name || 'Conectando'} · câmera` : name || 'Conectando';
+    this.el.setAttribute('aria-label', `${this.kind === 'cam' ? 'Câmera' : 'Tela'} de ${name || 'participante'}`);
   }
 
   setStream(stream) {
