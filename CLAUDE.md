@@ -95,6 +95,14 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil, monta
 - Configurações: campo "Câmera" (`setCam`, `settings.camId`, `''` = padrão do sistema). Câmera escolhida desconectada usa a padrão com aviso; câmera desconectada durante a call desliga com aviso. Erros ao ligar: acesso bloqueado (privacidade do Windows), nenhuma câmera, câmera em uso por outro programa.
 - Registro de diagnóstico: "Câmera ligada: LxA a N qps." e "Câmera desligada."
 
+## Placa de captura (2.5.1)
+
+- Pedido de 19/11/2026: um amigo joga no PS5 ligado ao PC por uma placa de captura, e ela não aparecia para compartilhar. Para o Windows a placa é um dispositivo de vídeo (como uma webcam), não um monitor, então o `desktopCapturer` nunca a lista.
+- Seletor (capture.js): aba "Placa de captura" (`data-kind="device"`), só aparece se houver algum dispositivo de vídeo (`listDevices().cameras`; webcams também aparecem, depois das placas, ordenadas por `CAPTURE_HINT`). O cartão escolhido mostra a prévia ao vivo, e essa mesma stream vira a transmissão (não reabre a placa). Erro ao abrir (placa em uso pelo OBS ou programa da placa, bloqueio de privacidade, não encontrada) aparece no próprio cartão.
+- Som: campo "Som da placa" (`#deviceAudio`) no lugar do interruptor de áudio, com as entradas de som e "Sem som". Escolha automática por `guessDeviceAudio` (palavras em comum com o nome da placa e nomes típicos como "USB Digital Audio", "HDMI", Elgato, AVerMedia); captura sem cancelamento de eco nem supressão de ruído, estéreo. A escolha fica em `lastSource` (`kind: 'device'`, `audioName`) e a próxima transmissão abre direto na placa (antes de um jogo aberto no PC).
+- A imagem vai como uma tela comum (`kind: 'screen'`, rótulo "som da placa"): mesma escolha de qps e resolução (captura até 1080p, reduzida no envio), repasse e retransmissão. Sem ponteiro e desenho (não há `sourceId`). Só no app; a versão web continua com o seletor do navegador.
+- `#applyQuality` agora mantém as outras restrições ao mudar o qps (`...video.getConstraints()`); sem isso a placa voltaria para a resolução padrão.
+
 ## Fluxo de trabalho
 
 - Testes: Playwright com 2 ou 3 contextos, servidor estático em `app/renderer` (porta 5173), `server/server.mjs` (8080) e `wrangler dev` (8787). No navegador sem Electron, `window.__telinhaServer = { server, iceServers }` simula o servidor embutido e `?sala=<código>` entra direto numa turma. `window.__telinhaBlocked` (Set de peerIds) simula duas pessoas sem conexão direta.
@@ -117,9 +125,15 @@ ferramentas/           scripts auxiliares (repo, servidor, node portátil, monta
 - **Medição de envio pelo `pc.getStats()`** pegava o `outbound-rtp` com mais bytes, que da 2ª transmissão em diante é o envio antigo (sem faixa, parado): media 0 kbps e o repasse nunca entrava. Medir pelo `sender.getStats()` dos envios com a faixa atual (`#videoTracksTo`).
 - No registro de 17/10/2026, quem tinha 135 a 700 ms de atraso (internet ruim) virou repassador de quem estava a 14 ms de quem transmitia: a tela chegava recodificada e ruim. Por isso as regras de atraso no repasse (item 5 acima).
 
+## Situação em 19/11/2026
+
+- **2.5.0 publicada em 12/11/2026** (câmera; `publicar-log.txt` termina em "Publicado", versão web publicada junto).
+- **Placa de captura escrita no PC, ainda não publicada** (package.json em **2.5.1**). Ver "Placa de captura (2.5.1)". Para publicar: rodar `Publicar atualizacao.bat` (o amigo da placa precisa da 2.5.1; quem só assiste não precisa).
+- Testado com Playwright (Chromium com câmera e microfones falsos, `server/server.mjs`, 2 contextos, 17 verificações): aba aparece, prévia ao vivo 1920x1080, campo de som, transmissão com vídeo e som da placa, quem assiste recebe 1920x1080, resolução mantida depois do ajuste de qps, lembra placa e som, reabre na placa, cancelar libera a placa, aba Telas inalterada. `guessDeviceAudio` conferido com nomes de placas genéricas (USB Video + USB Digital Audio), Elgato, AVerMedia e Cam Link. **Não testado no Electron real nem com placa de verdade.** Conferir com o amigo: se a placa aparece com nome, se o som certo vem escolhido e se a imagem chega a 60 qps.
+
 ## Situação em 12/11/2026
 
-- **Câmera escrita no PC, ainda não publicada** (package.json em **2.5.0**). Ver "Câmera (2.5.0)". Para publicar: rodar `Publicar atualizacao.bat`; a versão web precisa ser publicada também para quem assiste pelo celular ver as câmeras.
+- **Câmera escrita no PC** (publicada como 2.5.0 no mesmo dia) (package.json em **2.5.0**). Ver "Câmera (2.5.0)". Para publicar: rodar `Publicar atualizacao.bat`; a versão web precisa ser publicada também para quem assiste pelo celular ver as câmeras.
 - Testado com Playwright (Chromium com câmera falsa, `server/server.mjs`, 3 contextos, 25 verificações): ligar e desligar, ver a própria espelhada, os outros veem no lugar da foto, abrir e fechar no palco, tela e câmera ao mesmo tempo, taxas (1,2 Mbps, 500 kbps transmitindo a tela, volta ao parar), religar, sair e voltar da call, lista nas configurações, sair da call desliga, e câmera pela ponte (A e C sem conexão direta). **Não testado no Electron real, com webcam de verdade nem em redes reais.** Conferir no app: permissão de câmera do Windows, e se ligar a câmera durante uma transmissão de tela não derruba a qualidade da tela por alguns segundos (a câmera nova renegocia as conexões).
 
 ## Situação em 05/11/2026

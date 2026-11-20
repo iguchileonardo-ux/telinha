@@ -153,6 +153,7 @@
       <div class="segmented" id="pickerTabs">
         <button type="button" data-kind="screen" class="active">Telas</button>
         <button type="button" data-kind="window">Janelas</button>
+        <button type="button" data-kind="device" hidden>Placa de captura</button>
         <button type="button" data-kind="audio">Só som</button>
       </div>
     </div>
@@ -165,6 +166,10 @@
           <span id="audioLabel">Áudio do computador</span>
           <small id="audioHint"></small>
         </span>
+      </label>
+      <label class="picker-audio" id="deviceAudioWrap" hidden>
+        <span>Som da placa</span>
+        <select id="deviceAudio" aria-label="Som da placa"></select>
       </label>
       <span class="grow"></span>
       <button class="btn ghost" id="pickerCancel" type="button">Cancelar</button>

@@ -151,6 +151,15 @@ export class Radio {
     const status = await this.player.status();
     if (!status) return;
     this.last = status;
+    // Depois de uma propaganda, volta ao ponto da turma antes de enviar a posição,
+    // para quem coordena não puxar todos para trás.
+    if (status.ad) this.wasAd = true;
+    else if (this.wasAd) {
+      this.wasAd = false;
+      this.lastTick = performance.now();
+      await this.apply(true);
+      return;
+    }
     // Reaplica o volume (o rádio abaixa quando alguém fala)
     const duck = !!this.app.speaking?.();
     if (duck !== this.ducked) { this.ducked = duck; this.#applyVolume(); }

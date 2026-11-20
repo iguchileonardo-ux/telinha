@@ -1016,7 +1016,11 @@ html.no-volume input[type="range"].volume { display: none; }
 .source:hover { background: var(--surface-2); }
 .source.selected { background: var(--accent-soft); border-color: var(--accent-line); }
 .source-thumb { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; background: var(--video-bg); display: grid; place-items: center; overflow: hidden; color: var(--faint); }
-.source-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.source-thumb img, .source-thumb video { width: 100%; height: 100%; object-fit: contain; }
+.source-note { padding: 0 14px; font-size: 12px; line-height: 1.45; text-align: center; color: var(--muted); }
+.picker-audio { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--muted); font-size: 13px; }
+.picker-audio > span { flex: none; }
+.picker-audio select { width: 280px; flex: 0 1 auto; }
 .source-badge {
   position: absolute;
   left: 6px;

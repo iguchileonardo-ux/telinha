@@ -1520,7 +1520,8 @@ export class TurmaSession extends EventTarget {
     if (video && video.contentHint !== q.hint) video.contentHint = q.hint;
     if (video && share.appliedFps !== q.fps) {
       share.appliedFps = q.fps;
-      video.applyConstraints({ frameRate: { ideal: q.fps, max: q.fps } }).catch(() => {});
+      // Mantém as outras restrições (a placa de captura perderia a resolução pedida).
+      video.applyConstraints({ ...video.getConstraints?.(), frameRate: { ideal: q.fps, max: q.fps } }).catch(() => {});
     }
     if (audio && audio.contentHint !== 'music') audio.contentHint = 'music';
     const sends = this.#directChildren().length;

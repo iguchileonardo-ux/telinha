@@ -27,8 +27,54 @@ function ensure() {
     webPreferences: { partition: 'persist:radio', sandbox: true, contextIsolation: true, backgroundThrottling: false },
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.on('closed', () => { win = null; currentId = null; });
+  win.on('closed', () => { win = null; currentId = null; stopAdWatch(); });
+  startAdWatch();
   return win;
+}
+
+// Propagandas: enquanto o player estiver com anúncio, deixa o vídeo mudo, clica em
+// "Pular" quando existir e leva o anúncio ao fim (ou acelera). Os seletores do botão
+// mudam com o tempo no YouTube; por isso a lista tem variações.
+const AD_JS = `(() => {
+  const p = document.getElementById('movie_player');
+  const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+  if (!p || !v) return null;
+  if (!p.classList.contains('ad-showing')) return false;
+  v.muted = true;
+  const skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, button[class*="skip-ad"], button[class*="ad-skip"]');
+  if (skip) skip.click();
+  try { v.playbackRate = 16; } catch {}
+  if (Number.isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration - 0.05;
+  return true;
+})()`;
+
+const AD_END_JS = `(() => {
+  const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+  if (v) v.playbackRate = 1;
+  return true;
+})()`;
+
+let adTimer = null;
+let adActive = false;
+
+function startAdWatch() {
+  if (adTimer) return;
+  adTimer = setInterval(async () => {
+    if (!win || win.isDestroyed() || !currentId) return;
+    const ad = await run(AD_JS);
+    if (ad === true) adActive = true;
+    else if (ad === false && adActive) {
+      adActive = false;
+      await run(AD_END_JS);
+      await applyVolume();
+    }
+  }, 400);
+}
+
+function stopAdWatch() {
+  if (adTimer) clearInterval(adTimer);
+  adTimer = null;
+  adActive = false;
 }
 
 const STATUS_JS = `(() => {
@@ -47,8 +93,9 @@ function applyVolume() {
   const v = Math.max(0, Math.min(1, volume));
   return run(`(() => {
     const p = document.getElementById('movie_player');
-    if (p && p.setVolume) { p.unMute && p.unMute(); p.setVolume(${Math.round(v * 100)}); }
-    const el = document.querySelector('video'); if (el) { el.muted = false; el.volume = ${v}; }
+    const ad = !!(p && p.classList.contains('ad-showing'));
+    if (p && p.setVolume) { if (!ad && p.unMute) p.unMute(); p.setVolume(${Math.round(v * 100)}); }
+    const el = document.querySelector('video'); if (el) { el.muted = ad; el.volume = ${v}; }
     return true;
   })()`);
 }
@@ -120,6 +167,7 @@ function status() {
 
 function stop() {
   currentId = null;
+  stopAdWatch();
   if (win && !win.isDestroyed()) win.destroy();
   win = null;
 }

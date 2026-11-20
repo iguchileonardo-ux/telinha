@@ -1,7 +1,8 @@
-// Escolha do que compartilhar e captura (tela, janela ou só o som, sem eco).
+// Escolha do que compartilhar e captura (tela, janela, placa de captura ou só o som, sem eco).
 // No app (Electron) mostramos um seletor próprio; no navegador usamos o nativo.
 import { icon } from './icons.js';
 import { createPcmTrack } from './audio.js';
+import { listDevices } from './devices.js';
 
 const bridge = window.telinha ?? null;
 
@@ -28,7 +29,9 @@ export function stopCapture() {
 }
 
 // Retorna { stream, kind: 'screen' | 'audio', label, audio, sourceId, warning } ou null se cancelar.
-// audio: 'window' | 'system' | 'system-echo' | 'browser' | null
+// audio: 'window' | 'system' | 'system-echo' | 'browser' | 'device' | null
+// Placa de captura (videogame ligado ao PC): para o Windows ela é um dispositivo de vídeo, como
+// uma webcam, e não aparece entre as telas. A imagem vai como uma tela (kind 'screen').
 // fps: quadros por segundo pedidos à captura (a resolução é reduzida no envio, em turma.js).
 export async function captureScreen({ fps = 30, audio = true, lastSource = null } = {}) {
   const frameRate = [24, 30, 60].includes(fps) ? fps : 30;
@@ -45,9 +48,11 @@ export async function captureScreen({ fps = 30, audio = true, lastSource = null 
   }
 
   const support = await getAudioSupport();
-  const choice = await openPicker({ audio, support, lastSource });
+  const choice = await openPicker({ audio, support, lastSource, frameRate });
   if (!choice) return null;
   stopCapture();
+
+  if (choice.kind === 'device') return captureDevice(choice, frameRate);
 
   // Só o som: nenhuma imagem, apenas a faixa de áudio capturada sem eco.
   if (choice.kind === 'audio') {
@@ -79,9 +84,95 @@ export async function captureScreen({ fps = 30, audio = true, lastSource = null 
   }
 }
 
+// ---- placa de captura ----
+
+// Até 1080p: a resolução escolhida nas configurações é aplicada no envio (turma.js).
+export function deviceVideoConstraints(deviceId, frameRate) {
+  return {
+    deviceId: { exact: deviceId },
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
+    frameRate: { ideal: frameRate, max: frameRate },
+  };
+}
+
+// Som do jogo: sem cancelamento de eco nem supressão de ruído, em estéreo.
+function deviceAudioConstraints(deviceId) {
+  return {
+    deviceId: { exact: deviceId },
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: { ideal: 2 },
+    sampleRate: { ideal: 48000 },
+  };
+}
+
+export function deviceError(error) {
+  const name = error?.name;
+  if (name === 'NotReadableError' || name === 'AbortError') return 'A placa está sendo usada por outro programa. Feche o OBS ou o programa da placa e tente de novo.';
+  if (name === 'NotAllowedError') return 'O acesso à câmera foi bloqueado. Libere a câmera nas configurações de privacidade do Windows.';
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'A placa não foi encontrada. Confira se ela está conectada.';
+  return 'Não foi possível abrir a placa.';
+}
+
+async function captureDevice(choice, frameRate) {
+  let stream = choice.stream;
+  if (!stream || !stream.getVideoTracks().some((t) => t.readyState === 'live')) {
+    stream?.getTracks().forEach((t) => t.stop());
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: deviceVideoConstraints(choice.deviceId, frameRate), audio: false });
+    } catch (error) {
+      console.warn('Placa de captura indisponível:', error);
+      throw new Error(deviceError(error));
+    }
+  }
+  const base = {
+    stream,
+    kind: 'screen',
+    label: choice.name,
+    sourceId: null,
+    source: { name: choice.name, kind: 'device', audioName: choice.audioName || '' },
+  };
+  if (!choice.audioId) return { ...base, audio: null };
+  try {
+    const sound = await navigator.mediaDevices.getUserMedia({ audio: deviceAudioConstraints(choice.audioId), video: false });
+    stream.addTrack(sound.getAudioTracks()[0]);
+    return { ...base, audio: 'device' };
+  } catch (error) {
+    console.warn('Som da placa indisponível:', error);
+    return { ...base, audio: null, warning: 'Compartilhando sem som: não foi possível abrir a entrada de som escolhida.' };
+  }
+}
+
+// Nomes que indicam placa de captura (as webcams ficam depois na lista).
+const CAPTURE_HINT = /captur|elgato|avermedia|live gamer|cam link|hdmi|hd60|4k60|usb video|ezcap|magewell|ripsaw|ms21[0-9]{2}|game/i;
+// Nomes de entrada de som típicos de placas (as genéricas aparecem como "USB Digital Audio").
+const CAPTURE_AUDIO_HINT = /captur|elgato|avermedia|live gamer|cam link|hdmi|hd60|digital audio|[áa]udio digital|ezcap|magewell|ripsaw|ms21[0-9]{2}/i;
+const COMMON_WORDS = new Set(['usb', 'video', 'vídeo', 'audio', 'áudio', 'device', 'dispositivo', 'de', 'the', 'input', 'entrada', 'microfone', 'microphone', 'interface', 'digital']);
+
+function words(name) {
+  return new Set(String(name).toLowerCase().split(/[^a-z0-9áéíóúâêôãõç]+/).filter((w) => w.length > 1 && !COMMON_WORDS.has(w)));
+}
+
+// Entrada de som mais provável da placa, ou '' se nenhuma parecer ser dela.
+export function guessDeviceAudio(videoName, inputs) {
+  const own = words(videoName);
+  const captureLike = CAPTURE_HINT.test(videoName);
+  let best = null;
+  let bestScore = 0;
+  for (const input of inputs) {
+    let score = 0;
+    for (const w of words(input.label)) if (own.has(w)) score += 2;
+    if (captureLike && CAPTURE_AUDIO_HINT.test(input.label)) score += 2;
+    if (score > bestScore) { best = input; bestScore = score; }
+  }
+  return bestScore >= 2 ? best.id : '';
+}
+
 // ---- seletor de fontes ----
 
-function openPicker({ audio, support, lastSource }) {
+function openPicker({ audio, support, lastSource, frameRate }) {
   const dlg = document.getElementById('picker');
   const grid = document.getElementById('sourceGrid');
   const tabs = document.getElementById('pickerTabs');
@@ -92,14 +183,27 @@ function openPicker({ audio, support, lastSource }) {
   const audioLabel = document.getElementById('audioLabel');
   const audioHint = document.getElementById('audioHint');
   const audioTab = tabs.querySelector('[data-kind="audio"]');
+  const deviceTab = tabs.querySelector('[data-kind="device"]');
+  const deviceAudioWrap = document.getElementById('deviceAudioWrap');
+  const deviceAudio = document.getElementById('deviceAudio');
   audioTab.hidden = !support.available;
+  deviceTab.hidden = true;
 
   let sources = [];
+  let audioInputs = [];
+  let preview = null; // { id, stream, error }
+  let previewSeq = 0;
+  let audioFor = null; // placa para a qual o som foi escolhido
   let kind = 'screen';
   let selected = null;
   let wantAudio = audio;
 
   function syncAudio() {
+    deviceAudioWrap.hidden = kind !== 'device';
+    if (kind === 'device') {
+      audioWrap.hidden = true;
+      return;
+    }
     if (kind === 'audio') {
       audioWrap.hidden = false;
       audioToggle.disabled = true;
@@ -121,6 +225,10 @@ function openPicker({ audio, support, lastSource }) {
   }
 
   function listFor(k) {
+    if (k === 'device') {
+      const list = sources.filter((s) => s.kind === 'device');
+      return [...list.filter((s) => CAPTURE_HINT.test(s.label)), ...list.filter((s) => !CAPTURE_HINT.test(s.label))];
+    }
     if (k === 'audio') {
       return [
         { id: 'system', name: 'Todo o som do computador', kind: 'audio', thumb: null, icon: null, system: true },
@@ -141,6 +249,21 @@ function openPicker({ audio, support, lastSource }) {
     const onConfirm = () => {
       if (!selected) return;
       const source = listFor(kind).find((s) => s.id === selected);
+      if (kind === 'device') {
+        const keep = preview?.id === selected && preview.stream ? preview.stream : null;
+        if (keep) preview = null; // a imagem da prévia vira a transmissão
+        const input = audioInputs.find((d) => d.id === deviceAudio.value);
+        finish({
+          id: selected,
+          kind,
+          name: source?.name || '',
+          deviceId: source?.deviceId,
+          stream: keep,
+          audioId: input?.id || '',
+          audioName: input?.label || '',
+        });
+        return;
+      }
       finish({
         id: selected,
         kind,
@@ -155,6 +278,7 @@ function openPicker({ audio, support, lastSource }) {
       if (!btn) return;
       kind = btn.dataset.kind;
       selected = null;
+      if (kind !== 'device') stopPreview();
       render();
     };
     const onToggle = () => { wantAudio = audioToggle.checked; };
@@ -166,6 +290,70 @@ function openPicker({ audio, support, lastSource }) {
         card.setAttribute('aria-pressed', String(card.dataset.id === id));
       }
       confirm.disabled = !selected;
+      if (kind === 'device' && id) {
+        showPreview(id);
+        if (audioFor !== id) { audioFor = id; pickDeviceAudio(id); }
+      }
+    }
+
+    // Prévia ao vivo da placa escolhida, para conferir que é a imagem do videogame.
+    function stopPreview() {
+      previewSeq++;
+      preview?.stream?.getTracks().forEach((t) => t.stop());
+      preview = null;
+    }
+
+    function paintPreview() {
+      for (const card of grid.querySelectorAll('.source')) {
+        const thumb = card.querySelector('.source-thumb');
+        if (!thumb || card.dataset.id === preview?.id) continue;
+        if (thumb.querySelector('video, .source-note')) thumb.replaceChildren(icon('video', 28));
+      }
+      const card = preview && [...grid.querySelectorAll('.source')].find((c) => c.dataset.id === preview.id);
+      const thumb = card?.querySelector('.source-thumb');
+      if (!thumb) return;
+      if (preview.error) {
+        const note = document.createElement('span');
+        note.className = 'source-note';
+        note.textContent = preview.error;
+        thumb.replaceChildren(note);
+      } else if (preview.stream && thumb.querySelector('video')?.srcObject !== preview.stream) {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.srcObject = preview.stream;
+        thumb.replaceChildren(video);
+      }
+    }
+
+    async function showPreview(id) {
+      if (preview?.id === id) { paintPreview(); return; }
+      stopPreview();
+      const seq = previewSeq;
+      const source = listFor('device').find((s) => s.id === id);
+      if (!source) return;
+      preview = { id, stream: null, error: null };
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: deviceVideoConstraints(source.deviceId, frameRate), audio: false });
+        if (seq !== previewSeq) { stream.getTracks().forEach((t) => t.stop()); return; }
+        preview.stream = stream;
+      } catch (error) {
+        if (seq !== previewSeq) return;
+        preview.error = deviceError(error);
+      }
+      paintPreview();
+    }
+
+    // Som da placa: o escolhido da última vez para esta placa, senão o mais provável pelo nome.
+    function pickDeviceAudio(id) {
+      const source = listFor('device').find((s) => s.id === id);
+      if (!source) return;
+      let value = guessDeviceAudio(source.label, audioInputs);
+      if (lastSource?.kind === 'device' && lastSource.name === source.name && typeof lastSource.audioName === 'string') {
+        value = lastSource.audioName ? audioInputs.find((d) => d.label === lastSource.audioName)?.id ?? value : '';
+      }
+      deviceAudio.value = value;
     }
 
     function render(preferred) {
@@ -174,7 +362,7 @@ function openPicker({ audio, support, lastSource }) {
       const list = listFor(kind);
       grid.replaceChildren();
       if (!list.length) {
-        grid.append(textNode(kind === 'screen' ? 'Nenhuma tela encontrada.' : 'Nenhuma janela aberta para compartilhar.'));
+        grid.append(textNode(kind === 'screen' ? 'Nenhuma tela encontrada.' : kind === 'device' ? 'Nenhuma placa de captura encontrada.' : 'Nenhuma janela aberta para compartilhar.'));
       }
       list.forEach((s, index) => {
         const card = document.createElement('button');
@@ -190,7 +378,7 @@ function openPicker({ audio, support, lastSource }) {
             img.alt = '';
             thumb.append(img);
           } else {
-            thumb.append(icon(kind === 'screen' ? 'monitor' : 'window', 28));
+            thumb.append(icon(kind === 'screen' ? 'monitor' : kind === 'device' ? 'video' : 'window', 28));
           }
           if (s.game) {
             const badge = document.createElement('span');
@@ -224,6 +412,7 @@ function openPicker({ audio, support, lastSource }) {
     }
 
     function cleanup() {
+      stopPreview();
       confirm.removeEventListener('click', onConfirm);
       cancel.removeEventListener('click', onCancel);
       tabs.removeEventListener('click', onTab);
@@ -242,13 +431,19 @@ function openPicker({ audio, support, lastSource }) {
     confirm.disabled = true;
     dlg.showModal();
 
-    bridge.listSources().then((list) => {
-      sources = list;
+    Promise.all([bridge.listSources(), listDevices()]).then(([list, devices]) => {
+      const cards = devices.cameras.map((d) => ({ id: `device:${d.id}`, deviceId: d.id, name: d.name, label: d.label, kind: 'device', thumb: null, icon: null }));
+      sources = [...list, ...cards];
+      audioInputs = devices.inputs;
+      deviceTab.hidden = !cards.length;
+      deviceAudio.replaceChildren(new Option('Sem som', ''), ...audioInputs.map((d) => new Option(d.name, d.id)));
       // Sugestão: um jogo aberto; senão, a última fonte usada.
       const game = sources.find((s) => s.game);
-      const last = lastSource && sources.find((s) => s.name === lastSource.name && (lastSource.kind === 'audio' || s.kind === lastSource.kind));
+      const last = lastSource && sources.find((s) => s.name === lastSource.name && (lastSource.kind === 'audio' ? s.kind !== 'device' : s.kind === lastSource.kind));
       let preferred = null;
-      if (game) { kind = 'window'; preferred = game.id; }
+      // Placa usada da última vez vem antes de um jogo aberto no PC (quem usa placa joga no console).
+      if (last && lastSource.kind === 'device') { kind = 'device'; preferred = last.id; }
+      else if (game) { kind = 'window'; preferred = game.id; }
       else if (last) { kind = lastSource.kind === 'audio' && support.available ? 'audio' : last.kind; preferred = last.id; }
       else if (lastSource?.kind === 'audio' && lastSource.name === 'Todo o som do computador' && support.available) { kind = 'audio'; preferred = 'system'; }
       else if (!sources.some((s) => s.kind === 'screen')) kind = 'window';

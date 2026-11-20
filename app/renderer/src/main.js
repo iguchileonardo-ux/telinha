@@ -606,6 +606,7 @@ const AUDIO_LABEL = {
   system: 'áudio do PC',
   'system-echo': 'áudio do PC',
   browser: 'com áudio',
+  device: 'som da placa',
 };
 
 function endShareExtras() {
@@ -646,7 +647,7 @@ async function toggleShare() {
     if (!result) return;
     if (s !== session) { result.stream.getTracks().forEach((t) => t.stop()); stopCapture(); return; }
     await s.startShare(result.stream, { kind: result.kind, label: result.label });
-    app.saveSettings({ lastSource: result.source ? { name: result.source.name, kind: result.kind === 'audio' ? 'audio' : result.source.kind } : null });
+    app.saveSettings({ lastSource: result.source ? { name: result.source.name, kind: result.kind === 'audio' ? 'audio' : result.source.kind, ...(result.source.kind === 'device' ? { audioName: result.source.audioName } : {}) } : null });
     if (result.sourceId) bridge?.overlayStart(result.sourceId).catch(() => {});
     const what = result.kind === 'audio' ? 'Tocando só o som' : `Ao vivo · ${AUDIO_LABEL[result.audio] || 'sem áudio'}`;
     call.setShareInfo(what, result.stream);
